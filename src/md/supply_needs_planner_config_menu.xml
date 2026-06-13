@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mdscript name="VAS_SupplyNeedsPlanner_Config"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="md.xsd">
+  <!--
+    Config state + Extension Options UI for Supply Needs Planner.
+    The planner engine lives in supply_needs_planner.xml (VAS_SupplyNeedsPlanner);
+    the right-click entries and the planner/ware-select windows live in
+    supply_needs_planner_interact_menu.xml (VAS_SupplyNeedsPlanner_Interact).
+  -->
+  <cues>
+    <!-- Config STATE container. Defaults live in exactly one place: SeedDefaults.
+         $lastConfig is deliberately NOT seeded - null means "no previous run yet"
+         and greys out the "Use previous config" button in the planner window. -->
+    <cue name="ModConfig" namespace="this">
+      <actions>
+        <run_actions ref="SeedDefaults"/>
+      </actions>
+    </cue>
+
+    <!--@doc
+        Idempotent defaults seeder. String-coercion null checks: explicit
+        false/0 must NOT be re-seeded. -->
+    <library name="SeedDefaults" purpose="run_actions">
+      <actions>
+        <do_if value="(@md.VAS_SupplyNeedsPlanner_Config.ModConfig.$debug + '') == 'null'">
+          <set_value name="md.VAS_SupplyNeedsPlanner_Config.ModConfig.$debug" exact="false" comment="Default: quiet."/>
+        </do_if>
+      </actions>
+    </library>
+
+    <!-- event_universe_generated fires both at new-game start AND on every
+         savegame load (md.xsd), so it alone covers all sessions. Seeds defaults
+         and re-pushes the debug chance the planner engine reads. -->
+    <cue name="InitDefaults" instantiate="true">
+      <conditions>
+        <event_universe_generated/>
+      </conditions>
+      <actions>
+        <run_actions ref="SeedDefaults"/>
+        <set_value name="player.entity.$vas_snp_debug_chance" exact="if md.VAS_SupplyNeedsPlanner_Config.ModConfig.$debug then 100 else 0"/>
+      </actions>
+    </cue>
+
+    <cue name="Register_Options_Menu" instantiate="true">
+      <conditions>
+        <event_cue_signalled cue="md.Simple_Menu_Options.Reloaded"/>
+      </conditions>
+      <actions>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Register_Options_Menu" param="table[
+          $id = 'vas_snp_options',
+          $columns = 2,
+          $title = {2026060601,11},
+          $onOpen = BuildOptionsMenu,
+        ]"/>
+        <reset_cue cue="this"/>
+      </actions>
+    </cue>
+
+    <cue name="BuildOptionsMenu" instantiate="true">
+      <conditions>
+        <event_cue_signalled/>
+      </conditions>
+      <actions>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Call_Table_Method" param="table[
+          $method = 'setColWidth',
+          $col = 1,
+          $width = 'Helper.standardButtonHeight',
+        ]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[$selectable = false]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[
+          $col = 1,
+          $colSpan = 2,
+          $text = {2026060601,11},
+          $font = 'Helper.standardFontBold',
+        ]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_CheckBox" param="table[
+          $col = 1,
+          $id = 'vas_snp_debug',
+          $checked = @md.VAS_SupplyNeedsPlanner_Config.ModConfig.$debug,
+          $width = 'Helper.standardButtonHeight',
+          $height = 'Helper.standardButtonHeight',
+          $onClick = OnOptionsDebugChanged,
+        ]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[
+          $col = 2,
+          $text = {2026060601,26},
+        ]"/>
+        <reset_cue cue="this"/>
+      </actions>
+    </cue>
+
+    <cue name="OnOptionsDebugChanged" instantiate="true">
+      <conditions>
+        <event_cue_signalled/>
+      </conditions>
+      <actions>
+        <set_value name="md.VAS_SupplyNeedsPlanner_Config.ModConfig.$debug" exact="event.param.$checked"/>
+        <set_value name="player.entity.$vas_snp_debug_chance" exact="if event.param.$checked then 100 else 0"/>
+        <reset_cue cue="this"/>
+      </actions>
+    </cue>
+  </cues>
+</mdscript>

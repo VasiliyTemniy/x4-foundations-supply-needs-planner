@@ -1,0 +1,624 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mdscript name="VAS_SupplyNeedsPlanner"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="md.xsd">
+  <cues>
+    <!-- Pure planner engine. Config state, the Extension Options entry, the
+         interact-menu hooks and the whole planner / ware-select UI live in
+         supply_needs_planner_config_menu.xml (mdscript VAS_SupplyNeedsPlanner_Config),
+         which signals RunPlanner here when the player confirms a run. -->
+    <cue name="Root">
+      <cues>
+        <!-- ══════════════════════════════════════════════════════════════
+             RunPlanner — the pure-MD planner (no Lua).
+
+             Reuses the vas_station_trader_multiorder routine's approach
+             heavily: per-trip leg lists, find_buy_offer / find_sell_offer,
+             cargo budgeting, a round-trip fill target, a per-leg floor, a
+             min-cargo gate, and "immediate" LIFO trade-order emission
+             (all sells then all buys -> after the LIFO reversal all buys
+             execute first, then all sells = buy from sources, deliver once).
+
+             Difference from the routine: a selected ship can make SEVERAL
+             round trips. We plan and emit one trip, which reserves its
+             offers, then plan the next against the now-reduced availability.
+             Trips execute in reverse planning order (each new "immediate"
+             trip jumps ahead of the previous one); harmless, since every
+             trip is a self-contained buy-then-deliver cycle to one target.
+
+             The orders are bound Execute Trade (TradePerform) deals via
+             create_trade_order on existing buy/sell offers — never SingleBuy/
+             SingleSell search orders, and never a resource-list enumeration.
+             ══════════════════════════════════════════════════════════════ -->
+        <cue name="RunPlanner" instantiate="true">
+          <conditions>
+            <event_cue_signalled/>
+          </conditions>
+          <actions>
+            <!-- Thin wrapper. The body lives in RunPlannerBody so its guard checks can
+                 early-out with <return/> — a cue's own action list has no early return
+                 (cancel_cue/reset_cue only take effect after it finishes). -->
+            <run_actions ref="RunPlannerBody"/>
+            <reset_cue cue="this"/>
+          </actions>
+        </cue>
+
+        <!--@doc
+            The planner body, run via run_actions (isolated temp-variable scope). It
+            sets up all its own variables and reaches for nothing outside the run
+            beyond globals (player.entity.*) and md.* cue refs; its real effects
+            (queued trade orders, notifications) are game side-effects that persist.
+            Each input guard fails fast with <return/>, keeping the body flat. -->
+        <library name="RunPlannerBody" purpose="run_actions">
+          <actions>
+            <set_value name="$data" exact="@player.entity.$vas_snp_data"/>
+            <set_value name="$cfg" exact="@player.entity.$vas_snp_config"/>
+            <set_value name="$target" exact="@$data.$fulfilltarget"/>
+
+            <!-- Config with fallbacks (in case a partial config table exists). -->
+            <set_value name="$sourceRestriction" exact="if @$cfg.$sourceRestriction then $cfg.$sourceRestriction else 'own'"/>
+            <set_value name="$fulfillPercent" exact="if @$cfg.$fulfillPercent then $cfg.$fulfillPercent else 100"/>
+            <set_value name="$maxWares" exact="if @$cfg.$maxWaresPerShip then $cfg.$maxWaresPerShip else 3"/>
+            <set_value name="$maxTrades" exact="if @$cfg.$maxTradesPerShip then $cfg.$maxTradesPerShip else 4"/>
+            <set_value name="$fillTargetPct" exact="if @$cfg.$fillTargetPercent then $cfg.$fillTargetPercent else 0"/>
+            <set_value name="$minCargoPct" exact="if @$cfg.$minCargoUsePercent then $cfg.$minCargoUsePercent else 0"/>
+            <set_value name="$minLegPct" exact="if @$cfg.$minLegPctPercent then $cfg.$minLegPctPercent else 0"/>
+            <set_value name="$sourcePriority" exact="if @$cfg.$sourcePriority then $cfg.$sourcePriority else 'cheapest'"/>
+            <!-- 0 is a valid value for these two, so null-check rather than truthy-check. -->
+            <set_value name="$maxSourceJumps" exact="if (@$cfg.$maxSourceJumps + '') == 'null' then 7 else $cfg.$maxSourceJumps"/>
+            <set_value name="$maxPriceAbovePct" exact="if (@$cfg.$maxPriceAbovePct + '') == 'null' then 500 else $cfg.$maxPriceAbovePct"/>
+            <set_value name="$maxTripsPerShip" exact="if @$cfg.$maxTripsPerShip then $cfg.$maxTripsPerShip else 10"/>
+
+            <set_value name="$ordercount" exact="0"/>
+            <set_value name="$shipcount" exact="0"/>
+
+            <set_value name="$debugname" exact="'snp_' + (if @$target then $target.idcode else 'run')"/>
+            <debug_to_file chance="@player.entity.$vas_snp_debug_chance" name="$debugname" directory="'VAS_SupplyNeedsPlanner'" text="'Run for %s. restriction=%s, priority=%s, maxjumps %s, maxprice +%s%%, fulfill %s%%, maxwares %s, maxtrades %s, maxtrips %s, filltgt %s%%, mincargo %s%%, minleg %s%%.'.[(if @$target then $target.knownname else 'null'), $sourceRestriction, $sourcePriority, $maxSourceJumps, $maxPriceAbovePct, $fulfillPercent, $maxWares, $maxTrades, $maxTripsPerShip, $fillTargetPct, $minCargoPct, $minLegPct]" append="false"/>
+
+            <do_if value="not @$target">
+              <show_notification text="{2026060601,74}" timeout="5s"/>
+              <return/>
+            </do_if>
+
+            <!-- ── 1. Usable ships: player container haulers with free space. ── -->
+            <set_value name="$usableships" exact="[]"/>
+            <do_for_each name="$ship" in="$data.$ships">
+              <do_if value="@$ship and $ship.isclass.ship and $ship.owner == faction.player and $ship.cargo.capacity.container gt 0">
+                <append_to_list name="$usableships" exact="$ship"/>
+              </do_if>
+            </do_for_each>
+
+            <do_if value="$usableships.count == 0">
+              <show_notification text="{2026060601,73}" timeout="5s"/>
+              <debug_to_file chance="@player.entity.$vas_snp_debug_chance" name="$debugname" directory="'VAS_SupplyNeedsPlanner'" text="'No usable ships.'" append="true"/>
+              <return/>
+            </do_if>
+
+            <!-- ── 2. Needs = the target's own buy offers (container wares). ──
+                     One entry per ware; $cap is fulfillPercent of the current
+                     demand, $planned accumulates what we commit across ships. -->
+            <find_buy_offer buyer="$target" multiple="true" tradepartner="$usableships.{1}" result="$needoffers"/>
+            <set_value name="$needs" exact="[]"/>
+            <do_for_each name="$off" in="$needoffers">
+              <!-- Skip wares the player unchecked in the ware-select sub-menu. -->
+              <do_if value="@$off.ware and $off.ware.waretransport == waretransport.container
+                          and (not @$cfg.$excludedWares or not $cfg.$excludedWares.indexof.{$off.ware})">
+                <!-- .amount is the demand EXCLUDING reservations (offeramount
+                         would add them back); the cap basis is the currently open need. -->
+                <set_value name="$orig" exact="$off.amount"/>
+                <do_if value="$orig gt 0">
+                  <append_to_list name="$needs" exact="table[
+                    $ware = $off.ware,
+                    $vol = $off.ware.volume,
+                    $cap = ($orig * $fulfillPercent) / 100,
+                    $planned = 0,
+                    $sources = [],
+                  ]"/>
+                </do_if>
+              </do_if>
+            </do_for_each>
+
+            <do_if value="$needs.count == 0">
+              <show_notification text="{2026060601,72}" timeout="5s"/>
+              <debug_to_file chance="@player.entity.$vas_snp_debug_chance" name="$debugname" directory="'VAS_SupplyNeedsPlanner'" text="'Target has no container buy offers.'" append="true"/>
+              <return/>
+            </do_if>
+
+            <!-- ── 3. Source stations, once, by restriction. ──
+                       own: player-owned stations.
+                       all: every known station that is not hostile and not the
+                            target itself. Heavier, but it is an opt-in one-shot. -->
+            <set_value name="$sourcestations" exact="[]"/>
+            <!-- 'ownfirst' enumerates like 'all' (own bias is applied at sort time).
+                  All modes drop sources further than $maxSourceJumps gate jumps
+                  from the target. -->
+            <do_if value="$sourceRestriction == 'all' or $sourceRestriction == 'ownfirst'">
+              <find_station space="player.galaxy" known="true" multiple="true" name="$allstations"/>
+              <do_for_each name="$st" in="$allstations">
+                <do_if value="@$st and $st != $target and not $st.ishostileto.{faction.player}
+                    and $st.gatedistance.{$target} ge 0 and $st.gatedistance.{$target} le $maxSourceJumps">
+                  <append_to_list name="$sourcestations" exact="$st"/>
+                </do_if>
+              </do_for_each>
+            </do_if>
+            <do_else>
+              <find_station space="player.galaxy" owner="faction.player" multiple="true" name="$ownstations"/>
+              <do_for_each name="$st" in="$ownstations">
+                <do_if value="@$st and $st != $target
+                    and $st.gatedistance.{$target} ge 0 and $st.gatedistance.{$target} le $maxSourceJumps">
+                  <append_to_list name="$sourcestations" exact="$st"/>
+                </do_if>
+              </do_for_each>
+            </do_else>
+
+            <!-- ── 3b. Per need, gather its source offers, cheapest first.
+                       Stored offers are live: reservations made later by
+                       create_trade_order reduce their .amount on the next read. -->
+            <do_all exact="$needs.count" counter="$ni">
+              <set_value name="$ware" exact="$needs.{$ni}.$ware"/>
+              <set_value name="$srclist" exact="[]"/>
+              <do_all exact="$sourcestations.count" counter="$si">
+                <do_if value="$usableships.{1}.gatedistance.{$sourcestations.{$si}} ge 0
+                     and not @$sourcestations.{$si}.sector.isblacklisted.{blacklisttype.sectoractivity}.{blacklistgroup.civilian}.{$usableships.{1}}
+                     and not @$sourcestations.{$si}.sector.isblacklisted.{blacklisttype.sectortravel}.{blacklistgroup.civilian}.{$usableships.{1}}">
+                  <find_sell_offer result="$so" seller="$sourcestations.{$si}" wares="$ware" tradepartner="$usableships.{1}">
+                    <match_seller tradesknownto="$usableships.{1}.owner">
+                      <match_use_blacklist group="blacklistgroup.civilian" type="blacklisttype.objectactivity" object="$usableships.{1}"/>
+                    </match_seller>
+                  </find_sell_offer>
+                  <do_if value="@$so and $so.available and $so.amount gt 0
+                                     and ((@$so.quantityfactor + '') == 'null'
+                                     or $so.quantityfactor le (100 + $maxPriceAbovePct) / 100.0)">
+                    <!-- Live offer; its .amount (reservation-excluded) drops as
+                         committed orders reserve, so re-reads stay correct.
+                         quantityfactor = current / average price; the cap rejects
+                         anything more than $maxPriceAbovePct % over average
+                         (500 = effectively no cap). -->
+                    <append_to_list name="$srclist" exact="table[
+                      $offer = $so,
+                      $price = $so.unitprice,
+                      $dist = $sourcestations.{$si}.gatedistance.{$target},
+                      $amount = $so.amount,
+                      $own = ($so.seller.owner == faction.player),
+                    ]"/>
+                  </do_if>
+                </do_if>
+              </do_all>
+              <do_if value="$srclist.count gt 1">
+                <do_if value="$sourcePriority == 'nearest'">
+                  <sort_list list="$srclist" sortbyvalue="loop.element.$dist"/>
+                </do_if>
+                <do_else>
+                  <sort_list list="$srclist" sortbyvalue="loop.element.$price"/>
+                </do_else>
+                <!-- 'ownfirst': stable-move own offers ahead of foreign ones,
+                           each group keeping the priority order just applied. -->
+                <do_if value="$sourceRestriction == 'ownfirst'">
+                  <set_value name="$ownsrc" exact="[]"/>
+                  <set_value name="$foreignsrc" exact="[]"/>
+                  <do_all exact="$srclist.count" counter="$pi">
+                    <do_if value="$srclist.{$pi}.$own">
+                      <append_to_list name="$ownsrc" exact="$srclist.{$pi}"/>
+                    </do_if>
+                    <do_else>
+                      <append_to_list name="$foreignsrc" exact="$srclist.{$pi}"/>
+                    </do_else>
+                  </do_all>
+                  <do_all exact="$foreignsrc.count" counter="$pi">
+                    <append_to_list name="$ownsrc" exact="$foreignsrc.{$pi}"/>
+                  </do_all>
+                  <set_value name="$srclist" exact="$ownsrc"/>
+                </do_if>
+              </do_if>
+              <set_value name="$needs.{$ni}.$sources" exact="$srclist"/>
+              <!-- Rescue ordering for the 'nearest' priority: the SAME sources sorted
+                   by biggest live stock first. Larger legs from deep-stock stations let
+                   an under-filling nearest trip be retried once and reach the floor.
+                   Only built for 'nearest'; for 'cheapest' the retry would be a no-op. -->
+              <do_if value="$sourcePriority == 'nearest'">
+                <set_value name="$bigsrc" exact="$srclist.clone"/>
+                <do_if value="$bigsrc.count gt 1">
+                  <sort_list list="$bigsrc" sortbyvalue="loop.element.$amount" sortdescending="true"/>
+                </do_if>
+                <set_value name="$needs.{$ni}.$sourcesBig" exact="$bigsrc"/>
+              </do_if>
+              <debug_to_file chance="@player.entity.$vas_snp_debug_chance" name="$debugname" directory="'VAS_SupplyNeedsPlanner'" text="'Need %s: cap %s, %s source(s).'.[$ware, $needs.{$ni}.$cap, $srclist.count]" append="true"/>
+            </do_all>
+
+            <!-- ── 4. Round-robin over ships. ──
+               Each round gives every still-active ship ONE round trip.
+               A trip buys until the fill target, then is committed as
+               Execute Trade orders — those orders do all the reservation
+               work, so trade.amount (reservation-excluded) read on the
+               next ship / next round is already correct: no manual tally.
+               A ship whose best trip is below the min-cargo floor is
+               retired (a later round could only do the same or less).
+               The round loop is hard-bounded AND stops the moment a whole
+               round commits nothing (anti-endless-loop guard). -->
+            <set_value name="$doneships" exact="[]"/>
+            <set_value name="$committedships" exact="[]"/>
+            <set_value name="$shiptrips" exact="table[]"/>
+            <!-- Run-level scan offset: advances by each committed trip's
+               ware count so consecutive trips — across ships within a
+               round AND across rounds — fan out over distinct wares.
+               With N ships and maxWares W, the first round can cover up
+               to N*W distinct wares (e.g. 3 ships x 2 wares = all 6 in
+               round 1), instead of every ship grabbing the same first
+               wares. Kept bounded to [0, $needs.count) on advance. -->
+            <set_value name="$leadoffset" exact="0"/>
+            <set_value name="$maxRounds" exact="200"/>
+            <set_value name="$stop" exact="false"/>
+            <!-- Set if any trip ran out of trade slots while it still had cargo
+               room and demand left — i.e. raising Max trades would fill more.
+               Surfaced as a config hint in the closing notification. -->
+            <set_value name="$tradeCapWarn" exact="false"/>
+
+            <do_all exact="$maxRounds" counter="$round">
+              <do_if value="not $stop">
+                <set_value name="$progress" exact="false"/>
+
+                <do_for_each name="$ship" in="$usableships">
+                  <do_if value="not $doneships.indexof.{$ship} and (not @$shiptrips.{$ship} or $shiptrips.{$ship} lt $maxTripsPerShip)">
+                    <set_value name="$capacity" exact="$ship.cargo.capacity.container"/>
+                    <set_value name="$minLegVol" exact="($minLegPct * $capacity) / 100"/>
+                    <set_value name="$minCargoVol" exact="($minCargoPct * $capacity) / 100"/>
+                    <!-- 0/unset fill target => fill each trip to capacity. -->
+                    <set_value name="$fillTargetVol" exact="if $fillTargetPct gt 0 then ($fillTargetPct * $capacity) / 100 else $capacity"/>
+
+                    <!-- ═══ Source-strategy attempts ═══
+                       Try the configured source order first. If the trip can't reach
+                       the min-cargo floor AND priority is Nearest, retry the SAME ware
+                       basket once with sources re-sorted by biggest stock (the rescue),
+                       whose larger legs from deep-stock stations are far likelier to
+                       fill within Max trades. Each attempt rolls back its own planned
+                       amounts on failure; the first to clear the floor wins.
+                       NOTE: the attempt body below is intentionally left at this indent
+                       level to keep the diff small — it runs inside this loop. -->
+                    <set_value name="$strategies" exact="['$sources']"/>
+                    <do_if value="$sourcePriority == 'nearest'">
+                      <append_to_list name="$strategies" exact="'$sourcesBig'"/>
+                    </do_if>
+                    <set_value name="$filled" exact="false"/>
+                    <do_for_each name="$strategy" in="$strategies">
+                      <do_if value="not $filled">
+
+                        <set_value name="$selllegs" exact="[]"/>
+                        <set_value name="$buylegs" exact="[]"/>
+                        <set_value name="$tripvol" exact="0"/>
+                        <set_value name="$tripfree" exact="[$ship.cargo.free.container, $capacity].min"/>
+                        <set_value name="$tripwares" exact="[]"/>
+                        <set_value name="$triptrades" exact="0"/>
+
+                        <!-- ═══ Ware-spread fill ═══
+                           A station builds module-by-module, and every module needs a
+                           little of EACH resource, so a trip carrying one single ware
+                           cannot start construction until that ware's turn comes up.
+                           Instead we give every ware a fair SLICE of the trip first
+                           (pass 1), then greedily top the trip up toward the fill
+                           target (pass 2). Needs are scanned from a per-trip rotating
+                           offset, so when there are more needs than 'max wares per
+                           trip' the leading ware cycles and none is starved.
+                           $srctaken tallies how much each source has been planned THIS
+                           trip (orders aren't reserved until commit), so the two passes
+                           never over-allocate a single source. -->
+                        <set_value name="$activeneeds" exact="0"/>
+                        <do_all exact="$needs.count" counter="$ni">
+                          <do_if value="($needs.{$ni}.$cap - $needs.{$ni}.$planned) gt 0">
+                            <set_value name="$activeneeds" exact="$activeneeds + 1"/>
+                          </do_if>
+                        </do_all>
+                        <!-- Even slice per ware; divisor adapts so few-ware tails still
+                             fill the ship rather than leaving it a fraction full. -->
+                        <set_value name="$slicediv" exact="[[[$maxWares, $maxTrades].min, $activeneeds].min, 1].max"/>
+                        <set_value name="$slicevol" exact="$fillTargetVol / $slicediv"/>
+                        <!-- $leadoffset is run-level (advanced on each commit below),
+                               already kept inside [0, $needs.count). -->
+                        <set_value name="$srctaken" exact="[]"/>
+
+                        <!-- Pass 1 = slice cap (spread); pass 2 = full demand (top-up). -->
+                        <do_all exact="2" counter="$pass">
+                          <do_if value="$tripvol lt $fillTargetVol and $triptrades lt $maxTrades and $tripfree gt 0">
+                            <do_all exact="$needs.count" counter="$ni">
+                              <!-- Rotated index into $needs (both terms < count => one wrap). -->
+                              <set_value name="$ridx" exact="$ni - 1 + $leadoffset"/>
+                              <do_if value="$ridx ge $needs.count">
+                                <set_value name="$ridx" exact="$ridx - $needs.count"/>
+                              </do_if>
+                              <set_value name="$ridx" exact="$ridx + 1"/>
+                              <set_value name="$need" exact="$needs.{$ridx}"/>
+                              <!-- indexof => 0 when absent, so a plain truthy test means
+                                     "already in the trip" (lets pass 2 grow it). -->
+                              <set_value name="$intrip" exact="$tripwares.indexof.{$need.$ware}"/>
+                              <do_if value="$tripvol lt $fillTargetVol and $triptrades lt $maxTrades and $tripfree gt 0
+                                            and ($need.$cap - $need.$planned) gt 0
+                                            and ($intrip or $tripwares.count lt $maxWares)">
+                                <find_buy_offer result="$tgt" buyer="$target" wares="$need.$ware" tradepartner="$ship"/>
+                                <do_if value="@$tgt and $tgt.available and $tgt.amount gt 0">
+                                  <set_value name="$tgtrem" exact="[$tgt.amount, $need.$cap - $need.$planned].min"/>
+                                  <do_if value="$pass == 1">
+                                    <set_value name="$tgtrem" exact="[$tgtrem, ($slicevol / $need.$vol)i].min"/>
+                                  </do_if>
+                                  <set_value name="$wareadded" exact="false"/>
+
+                                  <!-- Source this ware, priority order; skip stock already
+                                         planned for this source earlier in the trip. -->
+                                  <do_all exact="$need.{$strategy}.count" counter="$srci">
+                                    <do_if value="$triptrades lt $maxTrades and $tripfree gt 0 and $tgtrem gt 0 and $tripvol lt $fillTargetVol">
+                                      <set_value name="$src" exact="$need.{$strategy}.{$srci}.$offer"/>
+                                      <!-- Remaining availability after this trip's earlier plans. -->
+                                      <set_value name="$taken" exact="0"/>
+                                      <set_value name="$takenidx" exact="0"/>
+                                      <do_all exact="$srctaken.count" counter="$sti">
+                                        <do_if value="$srctaken.{$sti}.$seller == $src.seller and $srctaken.{$sti}.$ware == $src.ware">
+                                          <set_value name="$taken" exact="$srctaken.{$sti}.$amt"/>
+                                          <set_value name="$takenidx" exact="$sti"/>
+                                          <break/>
+                                        </do_if>
+                                      </do_all>
+                                      <set_value name="$savail" exact="[$src.amount - $taken, 0].max"/>
+                                      <!-- Respect per-ship sector/object blacklists and the
+                                             target buy offer's own faction restriction. -->
+                                      <do_if value="$savail gt 0
+                                                    and $ship.gatedistance.{$src.seller} ge 0
+                                                    and not @$src.seller.sector.isblacklisted.{blacklisttype.sectoractivity}.{blacklistgroup.civilian}.{$ship}
+                                                    and not @$src.seller.sector.isblacklisted.{blacklisttype.sectortravel}.{blacklistgroup.civilian}.{$ship}
+                                                    and not $src.seller.isblacklisted.{blacklisttype.objectactivity}.{blacklistgroup.civilian}.{$ship}
+                                                    and (not $tgt.restriction.factions.count
+                                                         or (if $tgt.restriction.inverted
+                                                               then not $tgt.restriction.factions.indexof.{$src.seller.owner}
+                                                               else $tgt.restriction.factions.indexof.{$src.seller.owner}))">
+                                        <set_value name="$amt" exact="[[[$savail, $tgtrem].min, ($tripfree / $need.$vol)i].min, 0].max"/>
+                                        <set_value name="$legvol" exact="$amt * $need.$vol"/>
+                                        <do_if value="$amt gt 0 and $legvol ge $minLegVol">
+                                          <append_to_list name="$selllegs" exact="table[$offer = $tgt, $amount = $amt, $station = $target]"/>
+                                          <append_to_list name="$buylegs" exact="table[
+                                              $offer = $src,
+                                              $amount = $amt,
+                                              $needidx = $ridx,
+                                              $station = $src.seller,
+                                            ]"/>
+                                          <set_value name="$tripfree" exact="[$tripfree - $legvol, 0].max"/>
+                                          <set_value name="$tripvol" exact="$tripvol + $legvol"/>
+                                          <set_value name="$tgtrem" exact="[$tgtrem - $amt, 0].max"/>
+                                          <set_value name="$triptrades" exact="$triptrades + 1"/>
+                                          <set_value name="$needs.{$ridx}.$planned" exact="$needs.{$ridx}.$planned + $amt"/>
+                                          <do_if value="$takenidx">
+                                            <set_value name="$srctaken.{$takenidx}.$amt" exact="$srctaken.{$takenidx}.$amt + $amt"/>
+                                          </do_if>
+                                          <do_else>
+                                            <append_to_list name="$srctaken" exact="table[$seller = $src.seller, $ware = $src.ware, $amt = $amt]"/>
+                                          </do_else>
+                                          <set_value name="$wareadded" exact="true"/>
+                                          <debug_to_file chance="@player.entity.$vas_snp_debug_chance" name="$debugname" directory="'VAS_SupplyNeedsPlanner'" text="'  %s round %s p%s: %s x%s from %s (%s m3).'.[$ship.idcode, $round, $pass, $need.$ware, $amt, $src.seller.knownname, $legvol]" append="true"/>
+                                        </do_if>
+                                      </do_if>
+                                    </do_if>
+                                  </do_all>
+
+                                  <do_if value="$wareadded and not $intrip">
+                                    <append_to_list name="$tripwares" exact="$need.$ware"/>
+                                  </do_if>
+                                </do_if>
+                              </do_if>
+                            </do_all>
+                          </do_if>
+                        </do_all>
+
+                        <!-- Keep this attempt if it cleared the floor; otherwise roll back
+                               its planned amounts so the next strategy (or the next round)
+                               sees the demand again. -->
+                        <do_if value="$buylegs.count gt 0 and $tripvol ge $minCargoVol">
+                          <set_value name="$filled" exact="true"/>
+                        </do_if>
+                        <do_else>
+                          <do_if value="$buylegs.count gt 0">
+                            <debug_to_file chance="@player.entity.$vas_snp_debug_chance" name="$debugname" directory="'VAS_SupplyNeedsPlanner'" text="'  %s round %s attempt [%s] underfilled (%s%% of cap) — rolled back, NOT queued.'.[$ship.idcode, $round, $strategy, (if $capacity gt 0 then ($tripvol * 100) / $capacity else 0)]" append="true"/>
+                          </do_if>
+                          <do_all exact="$buylegs.count" counter="$li">
+                            <set_value name="$needs.{$buylegs.{$li}.$needidx}.$planned" exact="$needs.{$buylegs.{$li}.$needidx}.$planned - $buylegs.{$li}.$amount"/>
+                          </do_all>
+                        </do_else>
+
+                      </do_if>
+                    </do_for_each>
+
+                    <!-- Trade-cap hint: the deciding attempt ran out of trade slots with
+                         cargo room and still short of the fill target => more trades would
+                         help. (Reads the last attempt's state, which persists post-loop.) -->
+                    <do_if value="$triptrades ge $maxTrades and $tripvol lt $fillTargetVol and $tripfree gt $minLegVol">
+                      <set_value name="$tradeCapWarn" exact="true"/>
+                    </do_if>
+
+                    <!-- Commit the surviving trip (a strategy cleared the floor). -->
+                    <do_if value="$filled">
+                      <!-- Merge legs that hit the same station+ware (e.g. a pass-1 buy and
+                           its pass-2 top-up from the same source) into one order, so the
+                           queue shows one Execute Trade per source+ware, not several. -->
+                      <run_actions ref="MergeLegsBySite" result="$buylegs">
+                        <param name="Legs" value="$buylegs"/>
+                      </run_actions>
+                      <run_actions ref="MergeLegsBySite" result="$selllegs">
+                        <param name="Legs" value="$selllegs"/>
+                      </run_actions>
+                      <!-- Order the pickups into the farthest-from-target-first route.
+                           Emitted below under LIFO "immediate" orders, which invert the
+                           returned nearest-first chain into farthest-first execution, so
+                           the source nearest the target is the last pickup and the loaded
+                           final hop is the shortest. See RouteLegsFarthestFirst. -->
+                      <run_actions ref="RouteLegsFarthestFirst" result="$buylegs">
+                        <param name="Legs" value="$buylegs"/>
+                        <param name="Anchor" value="$target"/>
+                      </run_actions>
+                      <!-- Sells first; LIFO makes all buys execute before all sells. -->
+                      <do_all exact="$selllegs.count" counter="$li">
+                        <create_trade_order object="$ship" tradeoffer="$selllegs.{$li}.$offer" amount="$selllegs.{$li}.$amount" immediate="true"/>
+                      </do_all>
+                      <do_all exact="$buylegs.count" counter="$li">
+                        <create_trade_order object="$ship" tradeoffer="$buylegs.{$li}.$offer" amount="$buylegs.{$li}.$amount" immediate="true"/>
+                      </do_all>
+                      <set_value name="$ordercount" exact="$ordercount + $selllegs.count + $buylegs.count"/>
+                      <set_value name="$progress" exact="true"/>
+                      <set_value name="$shiptrips.{$ship}" exact="(if @$shiptrips.{$ship} then $shiptrips.{$ship} else 0) + 1"/>
+                      <!-- Advance the shared scan offset past the wares this trip
+                                 led with, so the next ship/trip starts on fresh wares. -->
+                      <set_value name="$leadoffset" exact="$leadoffset + $tripwares.count"/>
+                      <do_while value="$needs.count gt 0 and $leadoffset ge $needs.count">
+                        <set_value name="$leadoffset" exact="$leadoffset - $needs.count"/>
+                      </do_while>
+                      <do_if value="not $committedships.indexof.{$ship}">
+                        <append_to_list name="$committedships" exact="$ship"/>
+                      </do_if>
+                      <debug_to_file chance="@player.entity.$vas_snp_debug_chance" name="$debugname" directory="'VAS_SupplyNeedsPlanner'" text="'  %s round %s committed: %s wares, %s m3 (%s%% of %s).'.[$ship.idcode, $round, $tripwares.count, $tripvol, (if $capacity gt 0 then ($tripvol * 100) / $capacity else 0), $capacity]" append="true"/>
+                    </do_if>
+                    <do_else>
+                      <!-- No strategy reached the floor. Each attempt already rolled back
+                           its own planned amounts inside the loop above. -->
+                      <do_if value="$buylegs.count gt 0">
+                        <!-- Underfilled below the min-cargo floor. Do NOT retire the
+                             ship: nudge the shared offset so it leads with different
+                             wares next round (a different start can clear the floor).
+                             The whole-round-no-commit guard still ends the run once no
+                             offset yields a fillable trip for any ship. -->
+                        <set_value name="$leadoffset" exact="$leadoffset + 1"/>
+                        <do_while value="$needs.count gt 0 and $leadoffset ge $needs.count">
+                          <set_value name="$leadoffset" exact="$leadoffset - $needs.count"/>
+                        </do_while>
+                      </do_if>
+                      <do_else>
+                        <!-- Nothing tradeable for this ship at all (no reachable source
+                             for any remaining need): retire it. -->
+                        <append_to_list name="$doneships" exact="$ship"/>
+                      </do_else>
+                    </do_else>
+                  </do_if>
+                </do_for_each>
+
+                <!-- Anti-endless-loop: a whole round with no commit ends it. -->
+                <do_if value="not $progress">
+                  <set_value name="$stop" exact="true"/>
+                </do_if>
+              </do_if>
+            </do_all>
+
+            <set_value name="$shipcount" exact="$committedships.count"/>
+
+            <!-- ── 5. Summary ── -->
+            <do_if value="$ordercount gt 0">
+              <show_notification text="{2026060601,71}.[$ordercount, $shipcount]" timeout="6s"/>
+              <write_to_logbook category="upkeep" title="{2026060601,11}" text="{2026060601,71}.[$ordercount, $shipcount]"/>
+            </do_if>
+            <do_else>
+              <show_notification text="{2026060601,72}" timeout="5s"/>
+            </do_else>
+            <do_if value="$tradeCapWarn">
+              <show_notification text="{2026060601,76}" timeout="8s"/>
+            </do_if>
+            <debug_to_file chance="@player.entity.$vas_snp_debug_chance" name="$debugname" directory="'VAS_SupplyNeedsPlanner'" text="'Done: %s orders across %s ship(s).'.[$ordercount, $shipcount]" append="true"/>
+          </actions>
+        </library>
+
+        <!--@doc
+            Order a list of trade legs into a farthest-from-anchor-first visit route.
+            A greedy nearest-neighbour chain anchored at $Anchor (the delivery target):
+            repeatedly take the nearest unrouted SECTOR by gate distance, then the nearest
+            STATION within it by physical distance, stepping the route point onward. The
+            chain comes out nearest-anchor-FIRST and is returned as-is (NOT reversed):
+            callers emit it under LIFO "immediate" trade orders, which invert it into
+            farthest-first execution — so the source nearest the target is the LAST pickup
+            and the loaded final hop is the shortest possible.
+            Distances are always read with a leg's station as the object
+            (station.gatedistance.{$Anchor}), never as a method ON $Anchor, so $Anchor may
+            be a build storage (valid as a distance target, but not as a distance source).
+            Params:
+              Legs   - list of legs; each must hold $station (the stop). Other fields kept.
+              Anchor - the delivery target the route is anchored at.
+            Returns: a list with the same leg tables, in route order. -->
+        <library name="RouteLegsFarthestFirst" purpose="run_actions">
+          <params>
+            <param name="Legs" comment="List of legs; each holds $station plus any other fields"/>
+            <param name="Anchor" comment="Delivery target the route is anchored at"/>
+          </params>
+          <actions>
+            <!-- 0 or 1 legs: nothing to order. -->
+            <do_if value="$Legs.count le 1">
+              <return value="$Legs"/>
+            </do_if>
+            <set_value name="$rtunsorted" exact="$Legs.clone"/>
+            <set_value name="$rtsorted" exact="[]"/>
+            <set_value name="$rtcurrent" exact="$Anchor"/>
+            <do_while value="$rtunsorted.count gt 0">
+              <set_value name="$rtbestsector" exact="$rtunsorted.{1}.$station.sector"/>
+              <set_value name="$rtbestdist" exact="$rtunsorted.{1}.$station.gatedistance.{$rtcurrent}"/>
+              <do_all exact="$rtunsorted.count" counter="$rtri">
+                <set_value name="$rtleg" exact="$rtunsorted.{$rtri}"/>
+                <set_value name="$rtdist" exact="$rtleg.$station.gatedistance.{$rtcurrent}"/>
+                <do_if value="$rtdist lt $rtbestdist">
+                  <set_value name="$rtbestsector" exact="$rtleg.$station.sector"/>
+                  <set_value name="$rtbestdist" exact="$rtdist"/>
+                </do_if>
+              </do_all>
+              <do_while value="$rtunsorted.count gt 0">
+                <remove_value name="$rtpick"/>
+                <remove_value name="$rtpickdist"/>
+                <do_all exact="$rtunsorted.count" counter="$rtri">
+                  <set_value name="$rtleg" exact="$rtunsorted.{$rtri}"/>
+                  <do_if value="$rtleg.$station.sector == $rtbestsector">
+                    <set_value name="$rtdist" exact="$rtleg.$station.distanceto.{$rtcurrent}"/>
+                    <do_if value="not @$rtpick or $rtdist lt $rtpickdist">
+                      <set_value name="$rtpick" exact="$rtleg"/>
+                      <set_value name="$rtpickdist" exact="$rtdist"/>
+                    </do_if>
+                  </do_if>
+                </do_all>
+                <do_if value="@$rtpick">
+                  <append_to_list name="$rtsorted" exact="$rtpick"/>
+                  <set_value name="$rtcurrent" exact="$rtpick.$station"/>
+                  <remove_from_list name="$rtunsorted" exact="$rtpick"/>
+                </do_if>
+                <do_else>
+                  <break/>
+                </do_else>
+              </do_while>
+            </do_while>
+            <return value="$rtsorted"/>
+          </actions>
+        </library>
+
+        <!--@doc
+            Collapse trade legs that share the same stop and ware into one leg, summing
+            their amounts — so a pass-1 buy and a pass-2 top-up from the same source
+            become a single Execute Trade order instead of two. Keyed on
+            ($station, $offer.ware); the first leg of each group is kept (its $offer is
+            the one the order is created from) and later legs fold their amount into it.
+            Buy legs carry $station = source seller; sell legs carry $station = target,
+            so sells collapse per ware. Per-trip availability was already capped during
+            planning ($srctaken), so the summed amount is valid.
+            Param:  Legs - list of legs, each with $offer, $amount, $station.
+            Returns: a new list with one leg per (station, ware). -->
+        <library name="MergeLegsBySite" purpose="run_actions">
+          <params>
+            <param name="Legs" comment="List of legs; each holds $offer, $amount, $station"/>
+          </params>
+          <actions>
+            <set_value name="$merged" exact="[]"/>
+            <do_for_each name="$leg" in="$Legs">
+              <set_value name="$hit" exact="null"/>
+              <do_for_each name="$m" in="$merged">
+                <do_if value="$m.$station == $leg.$station and $m.$offer.ware == $leg.$offer.ware">
+                  <set_value name="$hit" exact="$m"/>
+                  <break/>
+                </do_if>
+              </do_for_each>
+              <do_if value="@$hit">
+                <set_value name="$hit.$amount" exact="$hit.$amount + $leg.$amount"/>
+              </do_if>
+              <do_else>
+                <append_to_list name="$merged" exact="$leg"/>
+              </do_else>
+            </do_for_each>
+            <return value="$merged"/>
+          </actions>
+        </library>
+      </cues>
+    </cue>
+  </cues>
+</mdscript>

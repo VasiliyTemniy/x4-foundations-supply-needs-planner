@@ -1,0 +1,637 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mdscript name="VAS_SupplyNeedsPlanner_Interact"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="md.xsd">
+  <!--
+    Player-action UI for Supply Needs Planner: the right-click interact-menu
+    entries, the planner run-config window and the ware-select sub-menu.
+    The planner engine lives in supply_needs_planner.xml (VAS_SupplyNeedsPlanner);
+    persistent config state lives in supply_needs_planner_config_menu.xml
+    (VAS_SupplyNeedsPlanner_Config). Run config is per-open scratch state on
+    player.entity.$vas_snp_config / $vas_snp_data.
+  -->
+  <cues>
+    <library name="DefaultRunConfig" purpose="run_actions">
+      <actions>
+        <set_value name="player.entity.$vas_snp_config" exact="table[
+          $sourceRestriction = 'own',
+          $sourcePriority = 'cheapest',
+          $maxSourceJumps = 7,
+          $maxPriceAbovePct = 50,
+          $fulfillPercent = 100,
+          $maxWaresPerShip = 3,
+          $maxTradesPerShip = 4,
+          $maxTripsPerShip = 10,
+          $fillTargetPercent = 80,
+          $minCargoUsePercent = 50,
+          $minLegPctPercent = 5,
+          $excludedWares = [],
+        ]"/>
+      </actions>
+    </library>
+
+    <!--@doc
+        True if Buyer currently advertises at least one container buy offer (amount > 0)
+        visible to Partner — i.e. the planner would actually have something to fulfil.
+        Used to hide an interact-menu entry when the station / build storage has no
+        needs (e.g. a shipyard whose build storage is empty).
+        Params: Buyer - station or build storage; Partner - trade-partner ship.
+        Returns: bool. -->
+    <library name="HasContainerNeed" purpose="run_actions">
+      <params>
+        <param name="Buyer" comment="Station or build storage to test"/>
+        <param name="Partner" comment="Trade-partner ship for offer visibility"/>
+      </params>
+      <actions>
+        <find_buy_offer buyer="$Buyer" multiple="true" tradepartner="$Partner" result="$offers"/>
+        <do_for_each name="$o" in="$offers">
+          <do_if value="@$o.ware and $o.ware.waretransport == waretransport.container and $o.amount gt 0">
+            <return value="true"/>
+          </do_if>
+        </do_for_each>
+        <return value="false"/>
+      </actions>
+    </library>
+
+    <cue name="Add_Interact_Actions" instantiate="true">
+      <conditions>
+        <event_cue_signalled cue="md.Interact_Menu_API.Get_Actions"/>
+      </conditions>
+      <actions>
+        <set_value name="$target" exact="@event.param.$object"/>
+        <set_value name="$ships" exact="@event.param.$selectedplayerships"/>
+        <!-- Own stations always pass; otherwise require non-hostile. -->
+        <set_value name="$friendly" exact="@$target.owner == faction.player or not @$target.ishostileto.{faction.player}"/>
+        <set_value name="$haveships" exact="@$ships.{1} != null"/>
+
+        <!-- Two vanilla-style entries (each with its own trade icon):
+             station's own needs, and the build storage's needs. The build
+             storage one keys off $target.buildstorage so it shows even on a
+             pre-construction station (where isclass.station may not hold).
+             Each entry only appears if its buyer actually advertises at least
+             one container buy offer — e.g. a shipyard with an empty build
+             storage shows "station needs" but not "build storage needs". -->
+        <do_if value="@$target.isclass.station and $friendly and $haveships">
+          <run_actions ref="HasContainerNeed" result="$stationhasneed">
+            <param name="Buyer" value="$target"/>
+            <param name="Partner" value="$ships.{1}"/>
+          </run_actions>
+          <do_if value="$stationhasneed">
+            <signal_cue_instantly cue="md.Interact_Menu_API.Add_Action" param="table[
+              $id = 'vas_snp_fulfill_station',
+              $section = 'selected_orders',
+              $text = {2026060601,64},
+              $icon = 'order_tradeperform',
+              $callback = OpenStationPlanner,
+            ]"/>
+          </do_if>
+        </do_if>
+
+        <do_if value="(@$target.buildstorage or @$target.isclass.buildstorage) and $friendly and $haveships">
+          <set_value name="$bs" exact="if @$target.isclass.buildstorage then $target else $target.buildstorage"/>
+          <do_if value="@$bs">
+            <run_actions ref="HasContainerNeed" result="$bshasneed">
+              <param name="Buyer" value="$bs"/>
+              <param name="Partner" value="$ships.{1}"/>
+            </run_actions>
+            <do_if value="$bshasneed">
+              <signal_cue_instantly cue="md.Interact_Menu_API.Add_Action" param="table[
+                $id = 'vas_snp_fulfill_buildstorage',
+                $section = 'selected_orders',
+                $text = {2026060601,65},
+                $icon = 'maptr_buildstorage',
+                $callback = OpenBuildStoragePlanner,
+              ]"/>
+            </do_if>
+          </do_if>
+        </do_if>
+
+        <cancel_cue cue="this"/>
+      </actions>
+    </cue>
+
+    <cue name="OpenStationPlanner" instantiate="true">
+      <conditions>
+        <event_cue_signalled/>
+      </conditions>
+      <actions>
+        <set_value name="$target" exact="@event.param.$object"/>
+        <set_value name="$ships" exact="@event.param.$selectedplayerships"/>
+        <do_if value="@$target.isclass.station">
+          <run_actions ref="DefaultRunConfig"/>
+          <set_value name="player.entity.$vas_snp_data" exact="table[
+            $fulfilltarget = $target,
+            $ships = $ships,
+          ]"/>
+          <signal_cue_instantly cue="BuildPlannerMenu"/>
+        </do_if>
+        <do_else>
+          <show_notification text="{2026060601,74}" timeout="4s"/>
+        </do_else>
+        <reset_cue cue="this"/>
+      </actions>
+    </cue>
+
+    <cue name="OpenBuildStoragePlanner" instantiate="true">
+      <conditions>
+        <event_cue_signalled/>
+      </conditions>
+      <actions>
+        <set_value name="$target" exact="@event.param.$object"/>
+        <set_value name="$ships" exact="@event.param.$selectedplayerships"/>
+        <set_value name="$bs" exact="null"/>
+        <do_if value="@$target.isclass.buildstorage">
+          <set_value name="$bs" exact="$target"/>
+        </do_if>
+        <do_elseif value="@$target.buildstorage">
+          <set_value name="$bs" exact="$target.buildstorage"/>
+        </do_elseif>
+        <do_if value="@$bs">
+          <run_actions ref="DefaultRunConfig"/>
+          <set_value name="player.entity.$vas_snp_data" exact="table[
+            $fulfilltarget = $bs,
+            $ships = $ships,
+          ]"/>
+          <signal_cue_instantly cue="BuildPlannerMenu"/>
+        </do_if>
+        <do_else>
+          <show_notification text="{2026060601,74}" timeout="4s"/>
+        </do_else>
+        <reset_cue cue="this"/>
+      </actions>
+    </cue>
+
+    <cue name="BuildPlannerMenu" instantiate="true">
+      <conditions>
+        <event_cue_signalled/>
+      </conditions>
+      <actions>
+        <set_value name="$cfg" exact="player.entity.$vas_snp_config"/>
+
+        <!-- Simple Menu API overwrites each dropdown option's id with its
+             1-based index, and matches $startOption against THAT index (not
+             our semantic $id). So translate the stored string value into the
+             option's position. The id lists below MUST stay in the same order
+             as the $options lists in the Make_Dropdown calls. Fallback to 1
+             (first option) when the stored value is missing/unrecognised. -->
+        <set_value name="$startRestriction" exact="['own', 'ownfirst', 'all'].indexof.{$cfg.$sourceRestriction}"/>
+        <do_if value="not $startRestriction">
+          <set_value name="$startRestriction" exact="1"/>
+        </do_if>
+        <set_value name="$startPriority" exact="['cheapest', 'nearest'].indexof.{$cfg.$sourcePriority}"/>
+        <do_if value="not $startPriority">
+          <set_value name="$startPriority" exact="1"/>
+        </do_if>
+
+        <signal_cue_instantly cue="md.Simple_Menu_API.Create_Menu" param="table[
+          $id = 'vas_snp_config_menu',
+          $columns = 2,
+          $title = {2026060601,10},
+          $width = 680,
+        ]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Call_Table_Method" param="table[
+          $method = 'setColWidth',
+          $col = 1,
+          $width = 340,
+        ]"/>
+
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[$col = 1, $text = {2026060601,20}]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Dropdown" param="table[
+          $id = 'sourceRestriction',
+          $echo = 'sourceRestriction',
+          $col = 2,
+          $options = [
+            table[$id = 'own', $text = {2026060601,22}],
+            table[$id = 'ownfirst', $text = {2026060601,34}],
+            table[$id = 'all', $text = {2026060601,21}]
+          ],
+          $startOption = $startRestriction,
+          $onDropDownConfirmed = OnConfigDropdownChanged,
+        ]"/>
+
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[$col = 1, $text = {2026060601,32}]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Dropdown" param="table[
+          $id = 'sourcePriority',
+          $echo = 'sourcePriority',
+          $col = 2,
+          $options = [
+            table[$id = 'cheapest', $text = {2026060601,35}],
+            table[$id = 'nearest', $text = {2026060601,36}]
+          ],
+          $startOption = $startPriority,
+          $onDropDownConfirmed = OnConfigDropdownChanged,
+        ]"/>
+
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[$col = 1, $text = {2026060601,30}]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Slider" param="table[
+          $col = 2,
+          $id = 'maxSourceJumps',
+          $echo = 'maxSourceJumps',
+          $min = 0,
+          $max = 12,
+          $step = 1,
+          $height = 'Helper.slidercellMinHeight',
+          $start = $cfg.$maxSourceJumps,
+          $onSliderCellConfirm = OnConfigSliderChanged,
+        ]"/>
+
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[$col = 1, $text = {2026060601,31}]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Slider" param="table[
+          $col = 2,
+          $id = 'maxPriceAbovePct',
+          $echo = 'maxPriceAbovePct',
+          $min = 0,
+          $max = 500,
+          $step = 1,
+          $height = 'Helper.slidercellMinHeight',
+          $start = $cfg.$maxPriceAbovePct,
+          $suffix = ' %',
+          $onSliderCellConfirm = OnConfigSliderChanged,
+        ]"/>
+
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[$col = 1, $text = {2026060601,23}]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Slider" param="table[
+          $col = 2,
+          $id = 'fulfillPercent',
+          $echo = 'fulfillPercent',
+          $min = 0,
+          $max = 100,
+          $step = 5,
+          $height = 'Helper.slidercellMinHeight',
+          $start = $cfg.$fulfillPercent,
+          $suffix = ' %',
+          $onSliderCellConfirm = OnConfigSliderChanged,
+        ]"/>
+
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[$col = 1, $text = {2026060601,24}]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Slider" param="table[
+          $col = 2,
+          $id = 'maxWaresPerShip',
+          $echo = 'maxWaresPerShip',
+          $min = 1,
+          $max = 10,
+          $step = 1,
+          $height = 'Helper.slidercellMinHeight',
+          $start = $cfg.$maxWaresPerShip,
+          $onSliderCellConfirm = OnConfigSliderChanged,
+        ]"/>
+
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[$col = 1, $text = {2026060601,28}]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Slider" param="table[
+          $col = 2,
+          $id = 'maxTradesPerShip',
+          $echo = 'maxTradesPerShip',
+          $min = 1,
+          $max = 15,
+          $step = 1,
+          $height = 'Helper.slidercellMinHeight',
+          $start = $cfg.$maxTradesPerShip,
+          $onSliderCellConfirm = OnConfigSliderChanged,
+        ]"/>
+
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[$col = 1, $text = {2026060601,33}]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Slider" param="table[
+          $col = 2,
+          $id = 'maxTripsPerShip',
+          $echo = 'maxTripsPerShip',
+          $min = 1,
+          $max = 20,
+          $step = 1,
+          $height = 'Helper.slidercellMinHeight',
+          $start = $cfg.$maxTripsPerShip,
+          $onSliderCellConfirm = OnConfigSliderChanged,
+        ]"/>
+
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[$col = 1, $text = {2026060601,29}]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Slider" param="table[
+          $col = 2,
+          $id = 'fillTargetPercent',
+          $echo = 'fillTargetPercent',
+          $min = 0,
+          $max = 100,
+          $step = 5,
+          $height = 'Helper.slidercellMinHeight',
+          $start = $cfg.$fillTargetPercent,
+          $suffix = ' %',
+          $onSliderCellConfirm = OnConfigSliderChanged,
+        ]"/>
+
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[$col = 1, $text = {2026060601,25}]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Slider" param="table[
+          $col = 2,
+          $id = 'minCargoUsePercent',
+          $echo = 'minCargoUsePercent',
+          $min = 0,
+          $max = 100,
+          $step = 5,
+          $height = 'Helper.slidercellMinHeight',
+          $start = $cfg.$minCargoUsePercent,
+          $suffix = ' %',
+          $onSliderCellConfirm = OnConfigSliderChanged,
+        ]"/>
+
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[$col = 1, $text = {2026060601,27}]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Slider" param="table[
+          $col = 2,
+          $id = 'minLegPctPercent',
+          $echo = 'minLegPctPercent',
+          $min = 0,
+          $max = 50,
+          $step = 5,
+          $height = 'Helper.slidercellMinHeight',
+          $start = $cfg.$minLegPctPercent,
+          $suffix = ' %',
+          $onSliderCellConfirm = OnConfigSliderChanged,
+        ]"/>
+
+        <!-- Open a sub-menu of the target's needed wares as checkboxes so the
+             player can drop individual wares from this run (handy for wharves with
+             many wares). All start checked = included. -->
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Button" param="table[
+          $col = 1,
+          $colSpan = 2,
+          $id = 'vas_snp_select_wares',
+          $text = table[$text = {2026060601,77}, $halign = 'center'],
+          $onClick = OpenWareSelectMenu,
+        ]"/>
+
+        <!-- Config management: restore defaults, or reload the config used
+             on the last run. "Use previous" is greyed out (via $active, see
+             sn_mod_support_apis button widget doc) until a run has saved one;
+             if somehow clicked with none stored it falls back to defaults. -->
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Button" param="table[
+          $col = 1,
+          $id = 'vas_snp_restore_default',
+          $text = table[$text = {2026060601,62}, $halign = 'center'],
+          $onClick = RestoreDefaultConfig,
+        ]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Button" param="table[
+          $col = 2,
+          $id = 'vas_snp_use_previous',
+          $text = table[$text = {2026060601,63}, $halign = 'center'],
+          $active = (@md.VAS_SupplyNeedsPlanner_Config.ModConfig.$lastConfig != null),
+          $onClick = UsePreviousConfig,
+        ]"/>
+
+        <!-- Single confirm; which needs (station vs build storage) was already
+             chosen by the interact-menu entry that opened this menu. -->
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Button" param="table[
+          $col = 1,
+          $colSpan = 2,
+          $id = 'vas_snp_confirm',
+          $text = table[$text = {2026060601,60}, $halign = 'center'],
+          $onClick = ExecutePlanner,
+        ]"/>
+
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Button" param="table[
+          $col = 1,
+          $colSpan = 2,
+          $id = 'vas_snp_close',
+          $text = table[$text = {2026060601,61}, $halign = 'center'],
+          $onClick = ClosePlannerMenu,
+        ]"/>
+
+        <reset_cue cue="this"/>
+      </actions>
+    </cue>
+
+    <cue name="OnConfigSliderChanged" instantiate="true">
+      <conditions>
+        <event_cue_signalled/>
+      </conditions>
+      <actions>
+        <set_value name="$key" exact="@event.param.$echo"/>
+        <do_if value="@$key">
+          <set_value name="player.entity.$vas_snp_config.{'$' + $key}" exact="event.param.$value"/>
+        </do_if>
+        <reset_cue cue="this"/>
+      </actions>
+    </cue>
+
+    <cue name="OnConfigDropdownChanged" instantiate="true">
+      <conditions>
+        <event_cue_signalled/>
+      </conditions>
+      <actions>
+        <set_value name="$key" exact="@event.param.$echo"/>
+        <do_if value="@$key and @event.param.$option.$id">
+          <set_value name="player.entity.$vas_snp_config.{'$' + $key}" exact="event.param.$option.$id"/>
+        </do_if>
+        <reset_cue cue="this"/>
+      </actions>
+    </cue>
+
+    <cue name="RestoreDefaultConfig" instantiate="true">
+      <conditions>
+        <event_cue_signalled/>
+      </conditions>
+      <actions>
+        <run_actions ref="DefaultRunConfig"/>
+        <signal_cue_instantly cue="BuildPlannerMenu"/>
+        <reset_cue cue="this"/>
+      </actions>
+    </cue>
+
+    <cue name="UsePreviousConfig" instantiate="true">
+      <conditions>
+        <event_cue_signalled/>
+      </conditions>
+      <actions>
+        <!-- Clone so editing sliders afterwards does not mutate the stored
+             last-run config. Fallback to defaults if nothing was saved. -->
+        <do_if value="@md.VAS_SupplyNeedsPlanner_Config.ModConfig.$lastConfig">
+          <set_value name="player.entity.$vas_snp_config" exact="md.VAS_SupplyNeedsPlanner_Config.ModConfig.$lastConfig.clone"/>
+        </do_if>
+        <do_else>
+          <run_actions ref="DefaultRunConfig"/>
+        </do_else>
+        <signal_cue_instantly cue="BuildPlannerMenu"/>
+        <reset_cue cue="this"/>
+      </actions>
+    </cue>
+
+    <cue name="ClosePlannerMenu" instantiate="true">
+      <conditions>
+        <event_cue_signalled/>
+      </conditions>
+      <actions>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Close_Menu"/>
+        <reset_cue cue="this"/>
+      </actions>
+    </cue>
+
+    <!-- Ware-select sub-menu: one checkbox per ware the target currently demands.
+         Checked = included in the run; unchecking adds the ware to $excludedWares,
+         which section 2 of the planner skips. Resets with the rest of the config on
+         each open (and is recalled by "Use previous config"). -->
+    <cue name="OpenWareSelectMenu" instantiate="true">
+      <conditions>
+        <event_cue_signalled/>
+      </conditions>
+      <actions>
+        <set_value name="$target" exact="@player.entity.$vas_snp_data.$fulfilltarget"/>
+        <set_value name="$ships" exact="@player.entity.$vas_snp_data.$ships"/>
+        <do_if value="not @player.entity.$vas_snp_config.$excludedWares">
+          <set_value name="player.entity.$vas_snp_config.$excludedWares" exact="[]"/>
+        </do_if>
+        <set_value name="$excluded" exact="player.entity.$vas_snp_config.$excludedWares"/>
+
+        <signal_cue_instantly cue="md.Simple_Menu_API.Create_Menu" param="table[
+          $id = 'vas_snp_ware_menu',
+          $columns = 2,
+          $title = {2026060601,78},
+          $width = 500,
+        ]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Call_Table_Method" param="table[
+          $method = 'setColWidth',
+          $col = 1,
+          $width = 'Helper.standardButtonHeight',
+        ]"/>
+
+        <find_buy_offer buyer="$target" multiple="true" tradepartner="$ships.{1}" result="$wareoffers"/>
+        <do_for_each name="$off" in="$wareoffers">
+          <do_if value="@$off.ware and $off.ware.waretransport == waretransport.container and $off.amount gt 0">
+            <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
+            <signal_cue_instantly cue="md.Simple_Menu_API.Make_CheckBox" param="table[
+              $col = 1,
+              $id = 'vas_snp_ware_' + $off.ware.id,
+              $echo = $off.ware,
+              $checked = not $excluded.indexof.{$off.ware},
+              $width = 'Helper.standardButtonHeight',
+              $height = 'Helper.standardButtonHeight',
+              $onClick = OnWareToggle,
+            ]"/>
+            <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[$col = 2, $text = $off.ware.name]"/>
+          </do_if>
+        </do_for_each>
+
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Button" param="table[
+          $col = 1,
+          $colSpan = 2,
+          $id = 'vas_snp_ware_toggle_all',
+          $text = table[$text = {2026060601,80}, $halign = 'center'],
+          $onClick = ToggleAllWares,
+        ]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Button" param="table[
+          $col = 1,
+          $colSpan = 2,
+          $id = 'vas_snp_ware_back',
+          $text = table[$text = {2026060601,79}, $halign = 'center'],
+          $onClick = BackToPlannerMenu,
+        ]"/>
+        <reset_cue cue="this"/>
+      </actions>
+    </cue>
+
+    <!-- Toggle button: if any current ware is excluded, select all (clear the
+         exclude list); otherwise all are selected, so deselect all (exclude every
+         current ware). No custom Lua here, so it rebuilds the menu to reflect the
+         new checkbox states (Create_Menu replaces the open one). -->
+    <cue name="ToggleAllWares" instantiate="true">
+      <conditions>
+        <event_cue_signalled/>
+      </conditions>
+      <actions>
+        <set_value name="$target" exact="@player.entity.$vas_snp_data.$fulfilltarget"/>
+        <set_value name="$ships" exact="@player.entity.$vas_snp_data.$ships"/>
+        <set_value name="$excluded" exact="if @player.entity.$vas_snp_config.$excludedWares then player.entity.$vas_snp_config.$excludedWares else []"/>
+
+        <set_value name="$wares" exact="[]"/>
+        <find_buy_offer buyer="$target" multiple="true" tradepartner="$ships.{1}" result="$wareoffers"/>
+        <do_for_each name="$off" in="$wareoffers">
+          <do_if value="@$off.ware and $off.ware.waretransport == waretransport.container and $off.amount gt 0
+                      and not $wares.indexof.{$off.ware}">
+            <append_to_list name="$wares" exact="$off.ware"/>
+          </do_if>
+        </do_for_each>
+
+        <set_value name="$anyExcluded" exact="false"/>
+        <do_for_each name="$w" in="$wares">
+          <do_if value="$excluded.indexof.{$w}">
+            <set_value name="$anyExcluded" exact="true"/>
+            <break/>
+          </do_if>
+        </do_for_each>
+        <do_if value="$anyExcluded">
+          <set_value name="player.entity.$vas_snp_config.$excludedWares" exact="[]"/>
+        </do_if>
+        <do_else>
+          <set_value name="player.entity.$vas_snp_config.$excludedWares" exact="$wares.clone"/>
+        </do_else>
+
+        <signal_cue_instantly cue="OpenWareSelectMenu"/>
+        <reset_cue cue="this"/>
+      </actions>
+    </cue>
+
+    <cue name="OnWareToggle" instantiate="true">
+      <conditions>
+        <event_cue_signalled/>
+      </conditions>
+      <actions>
+        <set_value name="$ware" exact="@event.param.$echo"/>
+        <do_if value="@$ware">
+          <do_if value="not @player.entity.$vas_snp_config.$excludedWares">
+            <set_value name="player.entity.$vas_snp_config.$excludedWares" exact="[]"/>
+          </do_if>
+          <do_if value="event.param.$checked">
+            <!-- Re-included: drop it from the exclude list (guard against dupes). -->
+            <do_while value="player.entity.$vas_snp_config.$excludedWares.indexof.{$ware}">
+              <remove_from_list name="player.entity.$vas_snp_config.$excludedWares" exact="$ware"/>
+            </do_while>
+          </do_if>
+          <do_else>
+            <!-- Excluded: add once. -->
+            <do_if value="not player.entity.$vas_snp_config.$excludedWares.indexof.{$ware}">
+              <append_to_list name="player.entity.$vas_snp_config.$excludedWares" exact="$ware"/>
+            </do_if>
+          </do_else>
+        </do_if>
+        <reset_cue cue="this"/>
+      </actions>
+    </cue>
+
+    <cue name="BackToPlannerMenu" instantiate="true">
+      <conditions>
+        <event_cue_signalled/>
+      </conditions>
+      <actions>
+        <signal_cue_instantly cue="BuildPlannerMenu"/>
+        <reset_cue cue="this"/>
+      </actions>
+    </cue>
+
+    <cue name="ExecutePlanner" instantiate="true">
+      <conditions>
+        <event_cue_signalled/>
+      </conditions>
+      <actions>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Close_Menu"/>
+        <!-- Remember this config so "Use previous config" can restore it. -->
+        <set_value name="md.VAS_SupplyNeedsPlanner_Config.ModConfig.$lastConfig" exact="player.entity.$vas_snp_config.clone"/>
+        <do_if value="@player.entity.$vas_snp_data.$fulfilltarget">
+          <show_notification text="{2026060601,70}.[player.entity.$vas_snp_data.$fulfilltarget.knownname]" timeout="4s"/>
+        </do_if>
+        <!-- The planner engine lives in the main script. -->
+        <signal_cue_instantly cue="md.VAS_SupplyNeedsPlanner.RunPlanner"/>
+        <reset_cue cue="this"/>
+      </actions>
+    </cue>
+  </cues>
+</mdscript>

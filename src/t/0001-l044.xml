@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<diff><add sel="/language">
+  <page id="2026060601" title="[VAS] Supply Needs Planner" descr="0" voice="no">
+    <!-- User-facing strings for VAS Supply Needs Planner -->
+
+    <!-- Right-click menu actions: reserved 1-9 -->
+    <t id="1">Fulfill needs</t>
+
+    <!-- Configuration menu -->
+    <!-- Menu and window titles: reserved 10-19 -->
+    <t id="10">Configure Supply Needs</t>
+    <t id="11">Supply Needs Planner</t>
+
+    <!-- Config rows: reserved 20-59 -->
+    <t id="20">Source restriction</t>
+    <t id="21">No restrictions</t>
+    <t id="22">Only own stations</t>
+    <t id="23">Fulfill percentage</t>
+    <t id="24">Max distinct wares per ship trip</t>
+    <t id="25">Minimum cargo usage per round trip</t>
+    <t id="26">Debug logging</t>
+    <t id="27">Minimum per-trade cargo fill</t>
+    <t id="28">Max trades per ship per round trip</t>
+    <t id="29">Round-trip fill target</t>
+    <t id="30">Max source distance</t>
+    <t id="31">Max price above average</t>
+    <t id="32">Source priority</t>
+    <t id="33">Max round trips per ship</t>
+    <t id="34">Own stations first</t>
+    <t id="35">Cheapest</t>
+    <t id="36">Nearest</t>
+
+    <!-- Buttons: reserved 60-69 -->
+    <t id="60">Run planner</t>
+    <t id="61">Close</t>
+    <t id="62">Restore default config</t>
+    <t id="63">Use previous config</t>
+    <t id="64">Fulfill station needs</t>
+    <t id="65">Fulfill build storage needs</t>
+
+    <!-- Notifications and logbook -->
+    <t id="70">Supply planner started for %1.</t>
+    <t id="71">Supply planner queued %1 trade orders for %2 ships.</t>
+    <t id="72">Supply planner found nothing useful to queue.</t>
+    <t id="73">No usable selected trader ships were found.</t>
+    <t id="74">No build storage target was found.</t>
+    <t id="75">No previous config saved yet.</t>
+    <t id="76">Some ships hit the Max trades per round trip limit before filling up. Raising it may improve cargo fill.</t>
+    <t id="77">Select wares to fulfil</t>
+    <t id="78">Wares to fulfil</t>
+    <t id="79">Back to config</t>
+    <t id="80">Select / deselect all</t>
+  </page>
+</add></diff>
