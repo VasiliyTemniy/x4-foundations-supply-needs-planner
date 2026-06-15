@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mdscript name="VAS_SupplyNeedsPlanner_Lib"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="md.xsd">
+  <cues>
+    <!--@doc
+        Container wares this target can be supplied with in virtual-money mode:
+        all resources (including intermediates), supply resources, plus trade wares,
+        deduplicated.
+        Works for player stations and build storages. -->
+    <library name="SupplyNeedWares" purpose="run_actions">
+      <params>
+        <param name="Target" comment="Station or build storage whose supply wares to list"/>
+      </params>
+      <actions>
+        <set_value name="$wares" exact="[]"/>
+        <do_for_each name="$w" in="$Target.resources.list">
+          <do_if value="@$w and $w.waretransport == waretransport.container and not $wares.indexof.{$w}">
+            <append_to_list name="$wares" exact="$w"/>
+          </do_if>
+        </do_for_each>
+        <do_for_each name="$w" in="$Target.supplyresources.list">
+          <do_if value="@$w and $w.waretransport == waretransport.container and not $wares.indexof.{$w}">
+            <append_to_list name="$wares" exact="$w"/>
+          </do_if>
+        </do_for_each>
+        <do_for_each name="$w" in="$Target.tradewares.list">
+          <do_if value="@$w and $w.waretransport == waretransport.container and not $wares.indexof.{$w}">
+            <append_to_list name="$wares" exact="$w"/>
+          </do_if>
+        </do_for_each>
+        <do_if value="$wares.count gt 1">
+          <sort_list list="$wares" sortbyvalue="loop.element.name"/>
+        </do_if>
+        <return value="$wares"/>
+      </actions>
+    </library>
+  </cues>
+</mdscript>

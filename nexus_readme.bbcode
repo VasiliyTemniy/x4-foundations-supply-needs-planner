@@ -1,8 +1,13 @@
 [size=6][b]Supply Needs Planner[/b][/size]
 
-Right-click a station (or its build storage) with selected trader ships and have them queue [b]Execute Trade[/b] deals that fulfil that target's needs - buying the wares from your own stations (or any non-hostile station) and delivering them.
+Right-click a station (or its build storage) with selected trader ships and have them queue [b]Execute Trade[/b] deals that fulfill that target's needs - buying the wares from your own stations (or any non-hostile station) and delivering them.
 
-The orders are ordinary [b]Execute Trade[/b] deals - the same kind a station trader makes. What counts as the target's "needs" is simply the buy offers the target station (or its build storage) is already advertising.
+The orders are ordinary [b]Execute Trade[/b] deals - the same kind a station trader makes. What counts as the target's "needs" depends on whose target it is:
+
+[list]
+[*]For [b]your own[/b] station or build storage, the needs come from its per-ware [b]storage targets[/b] - how much of each ware it wants minus how much it already holds. This works even at a zero account - through virtual offers.[/*]
+[*]For an [b]allied / NPC[/b] target, the needs are the real buy offers it is already advertising - cross-faction delivery can only go through real offers.[/*]
+[/list]
 
 [size=4][b]Why[/b][/size]
 
@@ -56,6 +61,7 @@ Within a trip the ship buys [b]farthest source first[/b] and the source nearest 
 [list]
 [*][b]Source restriction[/b] - [font=Courier New]Only own stations[/font], [font=Courier New]Own stations first[/font], or [font=Courier New]No restrictions[/font] (any known, non-hostile station).[/*]
 [*][b]Source priority[/b] - Pick the [font=Courier New]Cheapest[/font] source first, or the [font=Courier New]Nearest[/font] to the target.[/*]
+[*][b]Transaction handling[/b] - [i](own targets only)[/i] How the delivery leg is settled - see below.[/*]
 [*][b]Max source distance[/b] - Ignore sources more than this many gate jumps from the target.[/*]
 [*][b]Max price above average[/b] - Skip a source priced more than this % over the ware's average price (500 = effectively no cap).[/*]
 [*][b]Fulfill percentage[/b] - Cap each need at this share of the target's current demand.[/*]
@@ -68,6 +74,20 @@ Within a trip the ship buys [b]farthest source first[/b] and the source nearest 
 [/list]
 
 [b]Restore default config[/b] / [b]Use previous config[/b] are available in the menu; "Use previous" is greyed out until a run has saved one.
+
+The [b]Select wares to fulfill[/b] button opens a sub-menu with one checkbox per needed ware, so you can drop individual wares from a run. It also has a handful of quick-select helper buttons ([i]all[/i], [i]real offers only[/i], [i]pure / intermediate / primary / supply resources only[/i]) - convenient on a wharf with a long ware list, though for most station builds the full default selection is what you want anyway. Manual testing shown that most of the time it's effectively same "select all" and "deselect all" buttons with a bit more fancy labels.
+
+[size=3][b]Transaction handling[/b][/size]
+
+For your [b]own[/b] station or build storage you can choose how the delivery leg is settled. (Allied / NPC targets never show this choice - they can only be supplied through their real buy offers, so the planner always uses real trade for them.)
+
+[list]
+[*][b]Real offers[/b] - Delivers against the target's real, priced buy offers - the classic behaviour. Needs the station to have an account and be advertising the offers.[/*]
+[*][b]Virtual offers (overrides check)[/b] - Synthesizes a zero-price, virtual-money buy offer for each short ware, capped to the ware's existing offer amount where one is set - so it respects any logistics overrides you've configured. No account needed.[/*]
+[*][b]Virtual offers (by ware capacity)[/b] - Same synthesized offers, but sized straight from per-ware storage capacity ([font=Courier New]target - current[/font]), ignoring any advertised desired amount.[/*]
+[/list]
+
+[b]Why a virtual offer instead of a "transfer wares" \ "exchange wares" order?[/b] The [font=Courier New]virtualmoney[/font] flag is exactly what vanilla itself uses when mining ships sell to a commander's build station, so the delivery stays an ordinary [b]Execute Trade[/b] the game already understands. The only alternative - the [i]Exchange Wares[/i] order - isn't reachable from Mission Director script and would have to be reimplemented in Lua, buying nothing but a lot of pain and re-testing. So the original mod stays exactly as it was, and this simply adds one more case it can handle: supplying a station that has no account, or only a small one.
 
 [size=3][b]Tuning note: priority, sources and the cargo floor[/b][/size]
 

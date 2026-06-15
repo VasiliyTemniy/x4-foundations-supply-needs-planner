@@ -93,14 +93,88 @@
               <return/>
             </do_if>
 
-            <!-- ── 2. Needs = the target's own buy offers (container wares). ──
-                     One entry per ware; $cap is fulfillPercent of the current
-                     demand, $planned accumulates what we commit across ships. -->
+            <!-- ── 1b. Transaction mode. ──
+                 'virtual' settles the delivery leg as a normal TradePerform /
+                 "Execute Trade", but against a synthesized zero-price, virtual-money
+                 buy offer we put on the target (see section 2) — so it needs neither
+                 a station account nor an advertised offer (the case this exists for).
+                 This is NOT the engine's "Ware Exchange" order. 'real' uses the
+                 target's real priced buy offers. Virtual is valid only for our own
+                 real stations (never build storages, never foreign stations), which
+                 the menu enforces by showing the choice only there; allied targets
+                 are always forced to real trade here regardless of the stored value. -->
+            <!-- Modes: trade = real offers; virtual = virtual-money offers based on
+                 buy-offer desiredamount; virtualfullcapacity = virtual-money offers based
+                 on cargo target minus current cargo. -->
+            <set_value name="$txMethod" exact="if @$cfg.$transactionMethod then $cfg.$transactionMethod else 'real'"/>
+            <set_value name="$isOwnTarget" exact="@$target.owner == faction.player and @$target.isclass.[class.station, class.buildstorage]"/>
+            <set_value name="$mode" exact="if $isOwnTarget and $txMethod != 'real' then 'virtual' else 'real'"/>
+            <debug_to_file chance="@player.entity.$vas_snp_debug_chance" name="$debugname" directory="'VAS_SupplyNeedsPlanner'" text="'Transaction mode: %s (method=%s, owntarget=%s).'.[$mode, $txMethod, $isOwnTarget]" append="true"/>
+
+            <!-- 2. Needs = the target's buy offers (container wares).
+                     Virtual mode temporarily replaces the target's current buy offers
+                     with zero-price, virtual-money offers for every short supply ware,
+                     then the normal planner reads those offers exactly like real ones.
+                     After planning, only the synthetic offers created by this run are
+                     removed. The existing fulfillPercent cap below is still the single
+                     place that limits how much of an offer this run will plan. -->
+            <set_value name="$syntheticoffers" exact="[]"/>
+            <do_if value="$mode == 'virtual'">
+              <find_buy_offer buyer="$target" multiple="true" excludeempty="false" result="$targetoffers"/>
+              <set_value name="$desiredByWare" exact="table[]"/>
+              <set_value name="$realOffersByWare" exact="table[]"/>
+              <!-- Index current target offers once: desiredamount preserves logistics
+                   overrides; amount gt 0 marks real funded offers to replace. -->
+              <do_for_each name="$off" in="$targetoffers">
+                <do_if value="@$off.ware">
+                  <do_if value="not @$desiredByWare.{$off.ware} or $off.desiredamount gt $desiredByWare.{$off.ware}">
+                    <set_value name="$desiredByWare.{$off.ware}" exact="$off.desiredamount"/>
+                  </do_if>
+                  <do_if value="$off.amount gt 0">
+                    <do_if value="not @$realOffersByWare.{$off.ware}">
+                      <set_value name="$realOffersByWare.{$off.ware}" exact="[]"/>
+                    </do_if>
+                    <append_to_list name="$realOffersByWare.{$off.ware}" exact="$off"/>
+                  </do_if>
+                </do_if>
+              </do_for_each>
+              <run_actions ref="md.VAS_SupplyNeedsPlanner_Lib.SupplyNeedWares" result="$needWares">
+                <param name="Target" value="$target"/>
+              </run_actions>
+              <!-- Create one temporary virtual-money offer per selected short ware. -->
+              <do_for_each name="$nw" in="$needWares">
+                <do_if value="not @$cfg.$excludedWares or not $cfg.$excludedWares.indexof.{$nw}">
+                  <set_value name="$tgtAmount" exact="if (@$target.cargo.{$nw}.target + '') == 'null' then 0 else $target.cargo.{$nw}.target"/>
+                  <set_value name="$haveAmount" exact="if (@$target.cargo.{$nw}.count + '') == 'null' then 0 else $target.cargo.{$nw}.count"/>
+                  <set_value name="$deficit" exact="$tgtAmount - $haveAmount"/>
+                  <do_if value="$txMethod == 'virtual'">
+                    <set_value name="$offerDesired" exact="if @$desiredByWare.{$nw} then $desiredByWare.{$nw} else 0"/>
+                    <do_if value="$offerDesired gt 0">
+                      <set_value name="$deficit" exact="$offerDesired"/>
+                    </do_if>
+                  </do_if>
+                  <do_if value="$deficit gt 0">
+                    <do_if value="@$realOffersByWare.{$nw}">
+                      <do_for_each name="$oldoff" in="$realOffersByWare.{$nw}">
+                        <do_if value="@$oldoff">
+                          <remove_trade_offer object="$target" tradeoffer="$oldoff"/>
+                        </do_if>
+                      </do_for_each>
+                    </do_if>
+                    <create_trade_offer name="$synthetic" object="$target" buyer="$target" ware="$nw" amount="$deficit" desiredamount="$deficit" price="0Cr" virtualmoney="true" virtual="false" playeronly="true"/>
+                    <append_to_list name="$syntheticoffers" exact="$synthetic"/>
+                    <debug_to_file chance="@player.entity.$vas_snp_debug_chance" name="$debugname" directory="'VAS_SupplyNeedsPlanner'" text="'Virtual offer %s: want %s, have %s -> %s.'.[$nw, $tgtAmount, $haveAmount, $deficit]" append="true"/>
+                  </do_if>
+                </do_if>
+              </do_for_each>
+            </do_if>
+
             <find_buy_offer buyer="$target" multiple="true" tradepartner="$usableships.{1}" result="$needoffers"/>
             <set_value name="$needs" exact="[]"/>
             <do_for_each name="$off" in="$needoffers">
               <!-- Skip wares the player unchecked in the ware-select sub-menu. -->
               <do_if value="@$off.ware and $off.ware.waretransport == waretransport.container
+                          and ($mode != 'virtual' or $syntheticoffers.indexof.{$off})
                           and (not @$cfg.$excludedWares or not $cfg.$excludedWares.indexof.{$off.ware})">
                 <!-- .amount is the demand EXCLUDING reservations (offeramount
                          would add them back); the cap basis is the currently open need. -->
@@ -118,8 +192,11 @@
             </do_for_each>
 
             <do_if value="$needs.count == 0">
+              <do_for_each name="$offer" in="$syntheticoffers">
+                <remove_trade_offer object="$target" tradeoffer="$offer"/>
+              </do_for_each>
               <show_notification text="{2026060601,72}" timeout="5s"/>
-              <debug_to_file chance="@player.entity.$vas_snp_debug_chance" name="$debugname" directory="'VAS_SupplyNeedsPlanner'" text="'Target has no container buy offers.'" append="true"/>
+              <debug_to_file chance="@player.entity.$vas_snp_debug_chance" name="$debugname" directory="'VAS_SupplyNeedsPlanner'" text="'Target has no fulfillable needs (mode=%s).'.[$mode]" append="true"/>
               <return/>
             </do_if>
 
@@ -498,6 +575,12 @@
                 </do_if>
               </do_if>
             </do_all>
+
+            <do_if value="$mode == 'virtual'">
+              <do_for_each name="$offer" in="$syntheticoffers">
+                <remove_trade_offer object="$target" tradeoffer="$offer"/>
+              </do_for_each>
+            </do_if>
 
             <set_value name="$shipcount" exact="$committedships.count"/>
 

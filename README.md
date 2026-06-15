@@ -1,12 +1,17 @@
 # Supply Needs Planner
 
 Right-click a station (or its build storage) with selected trader ships and have
-them queue **Execute Trade** deals that fulfil that target's needs — buying the
+them queue **Execute Trade** deals that fulfill that target's needs — buying the
 wares from your own stations (or any non-hostile station) and delivering them.
 
 The orders are ordinary **Execute Trade** deals — the same kind a station trader
-makes. What counts as the target's "needs" is simply the buy offers the target
-station (or its build storage) is already advertising.
+makes. What counts as the target's "needs" depends on whose target it is:
+
+- For **your own** station or build storage, the needs come from its per-ware
+  **storage targets** — how much of each ware it wants minus how much it already
+  holds. This works even at a zero account - through virtual offers.
+- For an **allied / NPC** target, the needs are the real buy offers it is
+  already advertising — cross-faction delivery can only go through real offers.
 
 ## Why
 
@@ -86,6 +91,7 @@ possible.
 | --- | --- |
 | Source restriction | `Only own stations`, `Own stations first`, or `No restrictions` (any known, non-hostile station). |
 | Source priority | Pick the `Cheapest` source first, or the `Nearest` to the target. |
+| Transaction handling | *(own targets only)* How the delivery leg is settled — see below. |
 | Max source distance | Ignore sources more than this many gate jumps from the target. |
 | Max price above average | Skip a source priced more than this % over the ware's average price (500 = effectively no cap). |
 | Fulfill percentage | Cap each need at this share of the target's current demand. |
@@ -98,6 +104,35 @@ possible.
 
 **Restore default config** / **Use previous config** are available in the menu;
 "Use previous" is greyed out until a run has saved one.
+
+The **Select wares to fulfill** button opens a sub-menu with one checkbox per
+needed ware, so you can drop individual wares from a run. It also has a handful
+of quick-select helper buttons (*all*, *real offers only*, *pure* / *intermediate*
+/ *primary* / *supply* *resources* *only*) — convenient on a wharf with a long ware
+list, though for most station builds the full default selection is what you
+want anyway. Manual testing shown that most of the time it's effectively same
+"select all" and "deselect all" buttons with a bit more fancy labels.
+
+### Transaction handling
+
+For your **own** station or build storage you can choose how the delivery leg is
+settled. (Allied / NPC targets never show this choice — they can only be supplied
+through their real buy offers, so the planner always uses real trade for them.)
+
+| Mode | What it does |
+| --- | --- |
+| Real offers | Delivers against the target's real, priced buy offers — the classic behaviour. Needs the station to have an account and be advertising the offers. |
+| Virtual offers (overrides check) | Synthesizes a zero-price, virtual-money buy offer for each short ware, capped to the ware's existing offer amount where one is set — so it respects any logistics overrides you've configured. No account needed. |
+| Virtual offers (by ware capacity) | Same synthesized offers, but sized straight from per-ware storage capacity (`target − current`), ignoring any advertised desired amount. |
+
+**Why a virtual offer instead of a "transfer wares" \ "exchange wares" order?**
+The `virtualmoney` flag is exactly what vanilla itself uses when mining ships
+sell to a commander's build station, so the delivery stays an ordinary
+**Execute Trade** the game already understands. The only alternative — the
+*Exchange Wares* order — isn't reachable from Mission Director script and would
+have to be reimplemented in Lua, buying nothing but a lot of pain and re-testing.
+So the original mod stays exactly as it was, and this simply adds one more case
+it can handle: supplying a station that has no account, or only a small one.
 
 ### Tuning note: priority, sources and the cargo floor
 

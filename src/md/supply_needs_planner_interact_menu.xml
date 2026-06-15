@@ -13,8 +13,9 @@
     <library name="DefaultRunConfig" purpose="run_actions">
       <actions>
         <set_value name="player.entity.$vas_snp_config" exact="table[
-          $sourceRestriction = 'own',
+          $sourceRestriction = 'ownfirst',
           $sourcePriority = 'cheapest',
+          $transactionMethod = 'real',
           $maxSourceJumps = 7,
           $maxPriceAbovePct = 50,
           $fulfillPercent = 100,
@@ -31,12 +32,12 @@
 
     <!--@doc
         True if Buyer currently advertises at least one container buy offer (amount > 0)
-        visible to Partner — i.e. the planner would actually have something to fulfil.
+        visible to Partner i.e. the planner would actually have something to fulfill.
         Used to hide an interact-menu entry when the station / build storage has no
         needs (e.g. a shipyard whose build storage is empty).
         Params: Buyer - station or build storage; Partner - trade-partner ship.
         Returns: bool. -->
-    <library name="HasContainerNeed" purpose="run_actions">
+    <library name="HasAnyRealTradeOffer" purpose="run_actions">
       <params>
         <param name="Buyer" comment="Station or build storage to test"/>
         <param name="Partner" comment="Trade-partner ship for offer visibility"/>
@@ -49,6 +50,68 @@
           </do_if>
         </do_for_each>
         <return value="false"/>
+      </actions>
+    </library>
+
+    <!--@doc
+        True if Buyer (a player-owned station) is short of at least one supply ware,
+        i.e. there is something to deliver. Short = cargo.{ware}.target (the autocalc
+        per-ware stock target) gt cargo.{ware}.count, over SupplyNeedWares. Because
+        target is the station's own per-ware allocation, target gt count already
+        implies room exists no separate free-space check. Storage-based, not
+        offer-based, so it works for a zero-account station that advertises nothing.
+        Param: Buyer - player-owned station.
+        Returns: bool. -->
+    <library name="HasStorageNeed" purpose="run_actions">
+      <params>
+        <param name="Buyer" comment="Player-owned station to test"/>
+      </params>
+      <actions>
+        <run_actions ref="md.VAS_SupplyNeedsPlanner_Lib.SupplyNeedWares" result="$wares">
+          <param name="Target" value="$Buyer"/>
+        </run_actions>
+        <do_for_each name="$w" in="$wares">
+          <set_value name="$tgt" exact="if (@$Buyer.cargo.{$w}.target + '') == 'null' then 0 else $Buyer.cargo.{$w}.target"/>
+          <set_value name="$have" exact="if (@$Buyer.cargo.{$w}.count + '') == 'null' then 0 else $Buyer.cargo.{$w}.count"/>
+          <do_if value="($tgt - $have) gt 0">
+            <return value="true"/>
+          </do_if>
+        </do_for_each>
+        <return value="false"/>
+      </actions>
+    </library>
+
+    <!--@doc
+        The ware list shown in the ware-select sub-menu (and used by its toggle-all
+        button), as a list of ware objects. Own stations get exactly the supply-need
+        set the planner acts on (SupplyNeedWares), so every checkbox is meaningful;
+        other targets get the wares they currently demand via container buy offers.
+        Params: Target - station or build storage; Partner - trade-partner ship.
+        Returns: ware list. -->
+    <library name="WareSelectList" purpose="run_actions">
+      <params>
+        <param name="Target" comment="Station or build storage"/>
+        <param name="Partner" comment="Trade-partner ship for offer visibility"/>
+      </params>
+      <actions>
+        <do_if value="@$Target.owner == faction.player
+                      and @$Target.isclass.[class.station, class.buildstorage]
+                      and ((@player.entity.$vas_snp_config.$transactionMethod + '') == 'null'
+                           or player.entity.$vas_snp_config.$transactionMethod != 'real')">
+          <run_actions ref="md.VAS_SupplyNeedsPlanner_Lib.SupplyNeedWares" result="$supply">
+            <param name="Target" value="$Target"/>
+          </run_actions>
+          <return value="$supply"/>
+        </do_if>
+        <set_value name="$wares" exact="[]"/>
+        <find_buy_offer buyer="$Target" multiple="true" tradepartner="$Partner" result="$offers"/>
+        <do_for_each name="$off" in="$offers">
+          <do_if value="@$off.ware and $off.ware.waretransport == waretransport.container and $off.amount gt 0
+                      and not $wares.indexof.{$off.ware}">
+            <append_to_list name="$wares" exact="$off.ware"/>
+          </do_if>
+        </do_for_each>
+        <return value="$wares"/>
       </actions>
     </library>
 
@@ -67,14 +130,25 @@
              station's own needs, and the build storage's needs. The build
              storage one keys off $target.buildstorage so it shows even on a
              pre-construction station (where isclass.station may not hold).
-             Each entry only appears if its buyer actually advertises at least
-             one container buy offer — e.g. a shipyard with an empty build
-             storage shows "station needs" but not "build storage needs". -->
+             The station entry appears when there is something to fulfill
+             storage-based for our own stations (works at a zero account),
+             offer-based for allied ones; own build storages use the same
+             storage-deficit test. -->
         <do_if value="@$target.isclass.station and $friendly and $haveships">
-          <run_actions ref="HasContainerNeed" result="$stationhasneed">
-            <param name="Buyer" value="$target"/>
-            <param name="Partner" value="$ships.{1}"/>
-          </run_actions>
+          <!-- Own stations use a storage-based need test (works at zero account,
+               where no buy offers are advertised); other stations stay offer-based
+               since cross-faction delivery can only go through real buy offers. -->
+          <do_if value="@$target.owner == faction.player">
+            <run_actions ref="HasStorageNeed" result="$stationhasneed">
+              <param name="Buyer" value="$target"/>
+            </run_actions>
+          </do_if>
+          <do_else>
+            <run_actions ref="HasAnyRealTradeOffer" result="$stationhasneed">
+              <param name="Buyer" value="$target"/>
+              <param name="Partner" value="$ships.{1}"/>
+            </run_actions>
+          </do_else>
           <do_if value="$stationhasneed">
             <signal_cue_instantly cue="md.Interact_Menu_API.Add_Action" param="table[
               $id = 'vas_snp_fulfill_station',
@@ -89,10 +163,17 @@
         <do_if value="(@$target.buildstorage or @$target.isclass.buildstorage) and $friendly and $haveships">
           <set_value name="$bs" exact="if @$target.isclass.buildstorage then $target else $target.buildstorage"/>
           <do_if value="@$bs">
-            <run_actions ref="HasContainerNeed" result="$bshasneed">
-              <param name="Buyer" value="$bs"/>
-              <param name="Partner" value="$ships.{1}"/>
-            </run_actions>
+            <do_if value="@$bs.owner == faction.player">
+              <run_actions ref="HasStorageNeed" result="$bshasneed">
+                <param name="Buyer" value="$bs"/>
+              </run_actions>
+            </do_if>
+            <do_else>
+              <run_actions ref="HasAnyRealTradeOffer" result="$bshasneed">
+                <param name="Buyer" value="$bs"/>
+                <param name="Partner" value="$ships.{1}"/>
+              </run_actions>
+            </do_else>
             <do_if value="$bshasneed">
               <signal_cue_instantly cue="md.Interact_Menu_API.Add_Action" param="table[
                 $id = 'vas_snp_fulfill_buildstorage',
@@ -166,6 +247,10 @@
       </conditions>
       <actions>
         <set_value name="$cfg" exact="player.entity.$vas_snp_config"/>
+        <!-- The transaction-handling choice only exists for our own stations; allied
+             targets can only ever be supplied via their real buy offers. -->
+        <set_value name="$target" exact="@player.entity.$vas_snp_data.$fulfilltarget"/>
+        <set_value name="$isOwnTarget" exact="@$target.owner == faction.player and @$target.isclass.[class.station, class.buildstorage]"/>
 
         <!-- Simple Menu API overwrites each dropdown option's id with its
              1-based index, and matches $startOption against THAT index (not
@@ -173,7 +258,7 @@
              option's position. The id lists below MUST stay in the same order
              as the $options lists in the Make_Dropdown calls. Fallback to 1
              (first option) when the stored value is missing/unrecognised. -->
-        <set_value name="$startRestriction" exact="['own', 'ownfirst', 'all'].indexof.{$cfg.$sourceRestriction}"/>
+        <set_value name="$startRestriction" exact="['ownfirst', 'own', 'all'].indexof.{$cfg.$sourceRestriction}"/>
         <do_if value="not $startRestriction">
           <set_value name="$startRestriction" exact="1"/>
         </do_if>
@@ -201,8 +286,8 @@
           $echo = 'sourceRestriction',
           $col = 2,
           $options = [
-            table[$id = 'own', $text = {2026060601,22}],
             table[$id = 'ownfirst', $text = {2026060601,34}],
+            table[$id = 'own', $text = {2026060601,22}],
             table[$id = 'all', $text = {2026060601,21}]
           ],
           $startOption = $startRestriction,
@@ -222,6 +307,50 @@
           $startOption = $startPriority,
           $onDropDownConfirmed = OnConfigDropdownChanged,
         ]"/>
+
+        <!-- Transaction handling (own targets only): how the delivery leg is settled.
+             "Virtual offers" delivers into a synthesized zero-price, virtual-money buy
+             offer, so the station is supplied regardless of its account (still an
+             ordinary Execute Trade not the engine's Ware Exchange, which MD cannot
+             create). "Real offers" uses the station's real priced buy offers. Allied
+             targets never show this they can only be supplied via real offers and
+             the planner forces real trade for them regardless of the stored value. -->
+        <do_if value="$isOwnTarget">
+          <set_value name="$ships" exact="@player.entity.$vas_snp_data.$ships"/>
+          <run_actions ref="HasAnyRealTradeOffer" result="$targetHasRealOffers">
+            <param name="Buyer" value="$target"/>
+            <param name="Partner" value="$ships.{1}"/>
+          </run_actions>
+          <do_if value="$targetHasRealOffers">
+            <set_value name="$transactionOptions" exact="[
+              table[$id = 'real', $text = {2026060601,39}],
+              table[$id = 'virtual', $text = {2026060601,40}],
+              table[$id = 'virtualfullcapacity', $text = {2026060601,41}]
+            ]"/>
+            <set_value name="$startTransaction" exact="['real', 'virtual', 'virtualfullcapacity'].indexof.{$cfg.$transactionMethod}"/>
+            <do_if value="not $startTransaction">
+              <set_value name="$startTransaction" exact="1"/>
+            </do_if>
+          </do_if>
+          <do_else>
+            <set_value name="player.entity.$vas_snp_config.$transactionMethod" exact="'virtual'"/>
+            <set_value name="$transactionOptions" exact="[
+              table[$id = 'virtual', $text = {2026060601,40}],
+              table[$id = 'virtualfullcapacity', $text = {2026060601,41}]
+            ]"/>
+            <set_value name="$startTransaction" exact="1"/>
+          </do_else>
+          <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
+          <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[$col = 1, $text = {2026060601,37}]"/>
+          <signal_cue_instantly cue="md.Simple_Menu_API.Make_Dropdown" param="table[
+            $id = 'transactionMethod',
+            $echo = 'transactionMethod',
+            $col = 2,
+            $options = $transactionOptions,
+            $startOption = $startTransaction,
+            $onDropDownConfirmed = OnConfigDropdownChanged,
+          ]"/>
+        </do_if>
 
         <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
         <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[$col = 1, $text = {2026060601,30}]"/>
@@ -260,7 +389,7 @@
           $echo = 'fulfillPercent',
           $min = 0,
           $max = 100,
-          $step = 5,
+          $step = 1,
           $height = 'Helper.slidercellMinHeight',
           $start = $cfg.$fulfillPercent,
           $suffix = ' %',
@@ -317,7 +446,7 @@
           $echo = 'fillTargetPercent',
           $min = 0,
           $max = 100,
-          $step = 5,
+          $step = 1,
           $height = 'Helper.slidercellMinHeight',
           $start = $cfg.$fillTargetPercent,
           $suffix = ' %',
@@ -332,7 +461,7 @@
           $echo = 'minCargoUsePercent',
           $min = 0,
           $max = 100,
-          $step = 5,
+          $step = 1,
           $height = 'Helper.slidercellMinHeight',
           $start = $cfg.$minCargoUsePercent,
           $suffix = ' %',
@@ -347,7 +476,7 @@
           $echo = 'minLegPctPercent',
           $min = 0,
           $max = 50,
-          $step = 5,
+          $step = 1,
           $height = 'Helper.slidercellMinHeight',
           $start = $cfg.$minLegPctPercent,
           $suffix = ' %',
@@ -362,7 +491,7 @@
           $col = 1,
           $colSpan = 2,
           $id = 'vas_snp_select_wares',
-          $text = table[$text = {2026060601,77}, $halign = 'center'],
+          $text = table[$text = {2026060601,100}, $halign = 'center'],
           $onClick = OpenWareSelectMenu,
         ]"/>
 
@@ -493,7 +622,7 @@
         <signal_cue_instantly cue="md.Simple_Menu_API.Create_Menu" param="table[
           $id = 'vas_snp_ware_menu',
           $columns = 2,
-          $title = {2026060601,78},
+          $title = {2026060601,101},
           $width = 500,
         ]"/>
         <signal_cue_instantly cue="md.Simple_Menu_API.Call_Table_Method" param="table[
@@ -502,21 +631,25 @@
           $width = 'Helper.standardButtonHeight',
         ]"/>
 
-        <find_buy_offer buyer="$target" multiple="true" tradepartner="$ships.{1}" result="$wareoffers"/>
-        <do_for_each name="$off" in="$wareoffers">
-          <do_if value="@$off.ware and $off.ware.waretransport == waretransport.container and $off.amount gt 0">
-            <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
-            <signal_cue_instantly cue="md.Simple_Menu_API.Make_CheckBox" param="table[
-              $col = 1,
-              $id = 'vas_snp_ware_' + $off.ware.id,
-              $echo = $off.ware,
-              $checked = not $excluded.indexof.{$off.ware},
-              $width = 'Helper.standardButtonHeight',
-              $height = 'Helper.standardButtonHeight',
-              $onClick = OnWareToggle,
-            ]"/>
-            <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[$col = 2, $text = $off.ware.name]"/>
-          </do_if>
+        <!-- Own stations: list every handled ware (storage-based), so the player can
+             manage wares even on a zero-account station that advertises no offers.
+             Other stations: list the wares they currently demand via buy offers. -->
+        <run_actions ref="WareSelectList" result="$wares">
+          <param name="Target" value="$target"/>
+          <param name="Partner" value="$ships.{1}"/>
+        </run_actions>
+        <do_for_each name="$w" in="$wares">
+          <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
+          <signal_cue_instantly cue="md.Simple_Menu_API.Make_CheckBox" param="table[
+            $col = 1,
+            $id = 'vas_snp_ware_' + $w.id,
+            $echo = $w,
+            $checked = not $excluded.indexof.{$w},
+            $width = 'Helper.standardButtonHeight',
+            $height = 'Helper.standardButtonHeight',
+            $onClick = OnWareToggle,
+          ]"/>
+          <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[$col = 2, $text = $w.name]"/>
         </do_for_each>
 
         <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
@@ -524,15 +657,60 @@
           $col = 1,
           $colSpan = 2,
           $id = 'vas_snp_ware_toggle_all',
-          $text = table[$text = {2026060601,80}, $halign = 'center'],
+          $text = table[$text = {2026060601,103}, $halign = 'center'],
           $onClick = ToggleAllWares,
         ]"/>
         <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
         <signal_cue_instantly cue="md.Simple_Menu_API.Make_Button" param="table[
           $col = 1,
           $colSpan = 2,
+          $id = 'vas_snp_ware_only_real',
+          $echo = 'real',
+          $text = table[$text = {2026060601,104}, $halign = 'center'],
+          $onClick = SelectWareFilter,
+        ]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Button" param="table[
+          $col = 1,
+          $colSpan = 2,
+          $id = 'vas_snp_ware_only_pure',
+          $echo = 'pure',
+          $text = table[$text = {2026060601,105}, $halign = 'center'],
+          $onClick = SelectWareFilter,
+        ]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Button" param="table[
+          $col = 1,
+          $colSpan = 2,
+          $id = 'vas_snp_ware_only_intermediate',
+          $echo = 'intermediate',
+          $text = table[$text = {2026060601,106}, $halign = 'center'],
+          $onClick = SelectWareFilter,
+        ]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Button" param="table[
+          $col = 1,
+          $colSpan = 2,
+          $id = 'vas_snp_ware_only_primary',
+          $echo = 'primary',
+          $text = table[$text = {2026060601,107}, $halign = 'center'],
+          $onClick = SelectWareFilter,
+        ]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Button" param="table[
+          $col = 1,
+          $colSpan = 2,
+          $id = 'vas_snp_ware_only_supply',
+          $echo = 'supply',
+          $text = table[$text = {2026060601,108}, $halign = 'center'],
+          $onClick = SelectWareFilter,
+        ]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Button" param="table[
+          $col = 1,
+          $colSpan = 2,
           $id = 'vas_snp_ware_back',
-          $text = table[$text = {2026060601,79}, $halign = 'center'],
+          $text = table[$text = {2026060601,102}, $halign = 'center'],
           $onClick = BackToPlannerMenu,
         ]"/>
         <reset_cue cue="this"/>
@@ -552,14 +730,11 @@
         <set_value name="$ships" exact="@player.entity.$vas_snp_data.$ships"/>
         <set_value name="$excluded" exact="if @player.entity.$vas_snp_config.$excludedWares then player.entity.$vas_snp_config.$excludedWares else []"/>
 
-        <set_value name="$wares" exact="[]"/>
-        <find_buy_offer buyer="$target" multiple="true" tradepartner="$ships.{1}" result="$wareoffers"/>
-        <do_for_each name="$off" in="$wareoffers">
-          <do_if value="@$off.ware and $off.ware.waretransport == waretransport.container and $off.amount gt 0
-                      and not $wares.indexof.{$off.ware}">
-            <append_to_list name="$wares" exact="$off.ware"/>
-          </do_if>
-        </do_for_each>
+        <!-- Same ware set the sub-menu renders, so toggle-all matches the checkboxes. -->
+        <run_actions ref="WareSelectList" result="$wares">
+          <param name="Target" value="$target"/>
+          <param name="Partner" value="$ships.{1}"/>
+        </run_actions>
 
         <set_value name="$anyExcluded" exact="false"/>
         <do_for_each name="$w" in="$wares">
@@ -574,6 +749,71 @@
         <do_else>
           <set_value name="player.entity.$vas_snp_config.$excludedWares" exact="$wares.clone"/>
         </do_else>
+
+        <signal_cue_instantly cue="OpenWareSelectMenu"/>
+        <reset_cue cue="this"/>
+      </actions>
+    </cue>
+
+    <cue name="SelectWareFilter" instantiate="true">
+      <conditions>
+        <event_cue_signalled/>
+      </conditions>
+      <actions>
+        <set_value name="$mode" exact="@event.param.$echo"/>
+        <set_value name="$target" exact="@player.entity.$vas_snp_data.$fulfilltarget"/>
+        <set_value name="$ships" exact="@player.entity.$vas_snp_data.$ships"/>
+
+        <run_actions ref="WareSelectList" result="$wares">
+          <param name="Target" value="$target"/>
+          <param name="Partner" value="$ships.{1}"/>
+        </run_actions>
+        <set_value name="$selected" exact="[]"/>
+
+        <do_if value="$mode == 'real'">
+          <find_buy_offer buyer="$target" multiple="true" tradepartner="$ships.{1}" result="$offers"/>
+          <do_for_each name="$off" in="$offers">
+            <do_if value="@$off.ware and $off.ware.waretransport == waretransport.container and $off.amount gt 0
+                        and not $selected.indexof.{$off.ware}">
+              <append_to_list name="$selected" exact="$off.ware"/>
+            </do_if>
+          </do_for_each>
+        </do_if>
+        <do_elseif value="$mode == 'pure'">
+          <do_for_each name="$w" in="$target.resources.pure.list">
+            <do_if value="@$w and $w.waretransport == waretransport.container and not $selected.indexof.{$w}">
+              <append_to_list name="$selected" exact="$w"/>
+            </do_if>
+          </do_for_each>
+        </do_elseif>
+        <do_elseif value="$mode == 'intermediate'">
+          <do_for_each name="$w" in="$target.resources.intermediate.list">
+            <do_if value="@$w and $w.waretransport == waretransport.container and not $selected.indexof.{$w}">
+              <append_to_list name="$selected" exact="$w"/>
+            </do_if>
+          </do_for_each>
+        </do_elseif>
+        <do_elseif value="$mode == 'primary'">
+          <do_for_each name="$w" in="$target.resources.primary.list">
+            <do_if value="@$w and $w.waretransport == waretransport.container and not $selected.indexof.{$w}">
+              <append_to_list name="$selected" exact="$w"/>
+            </do_if>
+          </do_for_each>
+        </do_elseif>
+        <do_elseif value="$mode == 'supply'">
+          <do_for_each name="$w" in="$target.supplyresources.list">
+            <do_if value="@$w and $w.waretransport == waretransport.container and not $selected.indexof.{$w}">
+              <append_to_list name="$selected" exact="$w"/>
+            </do_if>
+          </do_for_each>
+        </do_elseif>
+
+        <set_value name="player.entity.$vas_snp_config.$excludedWares" exact="[]"/>
+        <do_for_each name="$w" in="$wares">
+          <do_if value="not $selected.indexof.{$w}">
+            <append_to_list name="player.entity.$vas_snp_config.$excludedWares" exact="$w"/>
+          </do_if>
+        </do_for_each>
 
         <signal_cue_instantly cue="OpenWareSelectMenu"/>
         <reset_cue cue="this"/>
