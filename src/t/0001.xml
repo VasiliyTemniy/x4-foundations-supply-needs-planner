@@ -31,7 +31,8 @@
     <t id="36">Nearest</t>
     <t id="37">Transaction handling</t>
     <t id="39">Real offers</t>
-    <t id="40">Virtual offers</t>
+    <t id="40">Virtual offers with overrides check</t>
+    <t id="41">Virtual offers based on ware capacity</t>
 
     <!-- Buttons: reserved 60-69 -->
     <t id="60">Run planner</t>
@@ -55,5 +56,10 @@
     <t id="101">Wares to fulfill</t>
     <t id="102">Back to config</t>
     <t id="103">Select / deselect all</t>
+    <t id="104">Select only wares with real offers</t>
+    <t id="105">Select only pure resources</t>
+    <t id="106">Select only intermediate wares</t>
+    <t id="107">Select only primary resources</t>
+    <t id="108">Select only supply resources</t>
   </page>
 </language>
