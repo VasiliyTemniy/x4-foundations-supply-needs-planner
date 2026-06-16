@@ -16,6 +16,8 @@
           $sourceRestriction = 'ownfirst',
           $sourcePriority = 'cheapest',
           $transactionMethod = 'real',
+          $preexistingCargo = 'donothing',
+          $preexistingOrders = 'keep',
           $maxSourceJumps = 7,
           $maxPriceAbovePct = 50,
           $fulfillPercent = 100,
@@ -27,6 +29,17 @@
           $minLegPctPercent = 5,
           $excludedWares = [],
         ]"/>
+      </actions>
+    </library>
+
+    <library name="InitialRunConfig" purpose="run_actions">
+      <actions>
+        <do_if value="@md.VAS_SupplyNeedsPlanner_Config.ModConfig.$lastConfig">
+          <set_value name="player.entity.$vas_snp_config" exact="md.VAS_SupplyNeedsPlanner_Config.ModConfig.$lastConfig.clone"/>
+        </do_if>
+        <do_else>
+          <run_actions ref="DefaultRunConfig"/>
+        </do_else>
       </actions>
     </library>
 
@@ -198,7 +211,7 @@
         <set_value name="$target" exact="@event.param.$object"/>
         <set_value name="$ships" exact="@event.param.$selectedplayerships"/>
         <do_if value="@$target.isclass.station">
-          <run_actions ref="DefaultRunConfig"/>
+          <run_actions ref="InitialRunConfig"/>
           <set_value name="player.entity.$vas_snp_data" exact="table[
             $fulfilltarget = $target,
             $ships = $ships,
@@ -227,7 +240,7 @@
           <set_value name="$bs" exact="$target.buildstorage"/>
         </do_elseif>
         <do_if value="@$bs">
-          <run_actions ref="DefaultRunConfig"/>
+          <run_actions ref="InitialRunConfig"/>
           <set_value name="player.entity.$vas_snp_data" exact="table[
             $fulfilltarget = $bs,
             $ships = $ships,
@@ -265,6 +278,14 @@
         <set_value name="$startPriority" exact="['cheapest', 'nearest'].indexof.{$cfg.$sourcePriority}"/>
         <do_if value="not $startPriority">
           <set_value name="$startPriority" exact="1"/>
+        </do_if>
+        <set_value name="$startCargo" exact="['donothing', 'sellfirst', 'drop'].indexof.{$cfg.$preexistingCargo}"/>
+        <do_if value="not $startCargo">
+          <set_value name="$startCargo" exact="1"/>
+        </do_if>
+        <set_value name="$startOrders" exact="['keep', 'flush'].indexof.{$cfg.$preexistingOrders}"/>
+        <do_if value="not $startOrders">
+          <set_value name="$startOrders" exact="1"/>
         </do_if>
 
         <signal_cue_instantly cue="md.Simple_Menu_API.Create_Menu" param="table[
@@ -351,6 +372,42 @@
             $onDropDownConfirmed = OnConfigDropdownChanged,
           ]"/>
         </do_if>
+
+        <!-- Pre-existing ship cargo: how to treat cargo already aboard a selected
+             ship, which otherwise reduces the free space a trip can use (and can keep
+             a partly-loaded ship from passing the min-cargo gate). Applies to any
+             target. "Drop" is destructive (jettisons the cargo as lootable crates),
+             so it is never the default. -->
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[$col = 1, $text = {2026060601,42}]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Dropdown" param="table[
+          $id = 'preexistingCargo',
+          $echo = 'preexistingCargo',
+          $col = 2,
+          $options = [
+            table[$id = 'donothing', $text = {2026060601,43}],
+            table[$id = 'sellfirst', $text = {2026060601,44}],
+            table[$id = 'drop', $text = {2026060601,45}]
+          ],
+          $startOption = $startCargo,
+          $onDropDownConfirmed = OnConfigDropdownChanged,
+        ]"/>
+
+        <!-- Existing ship orders: optional queue cleanup for selected ships that
+             actually receive planner orders. Unused ships are not touched. -->
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[$col = 1, $text = {2026060601,46}]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Dropdown" param="table[
+          $id = 'preexistingOrders',
+          $echo = 'preexistingOrders',
+          $col = 2,
+          $options = [
+            table[$id = 'keep', $text = {2026060601,47}],
+            table[$id = 'flush', $text = {2026060601,48}]
+          ],
+          $startOption = $startOrders,
+          $onDropDownConfirmed = OnConfigDropdownChanged,
+        ]"/>
 
         <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row" param="table[]"/>
         <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[$col = 1, $text = {2026060601,30}]"/>
@@ -605,8 +662,8 @@
 
     <!-- Ware-select sub-menu: one checkbox per ware the target currently demands.
          Checked = included in the run; unchecking adds the ware to $excludedWares,
-         which section 2 of the planner skips. Resets with the rest of the config on
-         each open (and is recalled by "Use previous config"). -->
+         which section 2 of the planner skips. It follows the current run config:
+         previous run on initial open when available, defaults after "Restore default". -->
     <cue name="OpenWareSelectMenu" instantiate="true">
       <conditions>
         <event_cue_signalled/>

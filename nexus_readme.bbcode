@@ -52,6 +52,10 @@ Use cases:
 
 Clicking [b]Run planner[/b] plans every round trip in one pass and writes all the resulting buy/sell orders straight into the ships' queues. Each ship gets one or more round trips: a trip loads from source stations up to the [i]round-trip fill target[/i], then delivers the lot to the target in a single drop. When a trip finishes the ship rolls into the next queued one, and keeps going until the target's needs are covered (or you cancel the orders). The selected ships share the work, so the same stock is never booked twice.
 
+If selected ships already carry cargo, the planner can either leave it alone, sell it first, or drop it before the ship's first planned trip. In sell-first mode it first tries to deliver matching cargo to the planner target itself; if the target cannot take all of it, the rest is sold to the closest reachable buyer. This can turn a half-loaded trader from "not enough free cargo space" into useful first delivery instead of wasted routing.
+
+The planner can also keep or flush a participating ship's existing order queue. Flushing only happens for ships that actually receive planner orders; unused selected ships are left alone.
+
 Each trip is [b]spread across wares[/b] rather than filling up on one. A station is built module by module and every module needs a little of each resource, so a trip first gives every needed ware a fair slice (up to [i]Max wares per trip[/i]), then tops the cargo up toward the fill target. The result is that the target starts receiving a bit of everything from the very first trip instead of waiting several trips for the last ware to show up. When there are more needed wares than [i]Max wares per trip[/i], the wares that lead each trip rotate so none is starved - raising [i]Max wares per trip[/i] and [i]Max trades per trip[/i] lets a single trip carry more variety. Multiple selected ships divide the wares between them, so the first round of trips fans out across distinct wares: e.g. 3 ships with [i]Max wares per trip[/i] = 2 can cover 6 different needs in the very first round.
 
 Within a trip the ship buys [b]farthest source first[/b] and the source nearest the target last, so the loaded final hop to the delivery point is as short as possible.
@@ -62,6 +66,8 @@ Within a trip the ship buys [b]farthest source first[/b] and the source nearest 
 [*][b]Source restriction[/b] - [font=Courier New]Only own stations[/font], [font=Courier New]Own stations first[/font], or [font=Courier New]No restrictions[/font] (any known, non-hostile station).[/*]
 [*][b]Source priority[/b] - Pick the [font=Courier New]Cheapest[/font] source first, or the [font=Courier New]Nearest[/font] to the target.[/*]
 [*][b]Transaction handling[/b] - [i](own targets only)[/i] How the delivery leg is settled - see below.[/*]
+[*][b]Pre-existing ship cargo[/b] - What to do with cargo already aboard selected ships - see below.[/*]
+[*][b]Pre-existing ship orders[/b] - Keep existing orders, or flush them before adding planner orders for ships that actually participate.[/*]
 [*][b]Max source distance[/b] - Ignore sources more than this many gate jumps from the target.[/*]
 [*][b]Max price above average[/b] - Skip a source priced more than this % over the ware's average price (500 = effectively no cap).[/*]
 [*][b]Fulfill percentage[/b] - Cap each need at this share of the target's current demand.[/*]
@@ -69,11 +75,11 @@ Within a trip the ship buys [b]farthest source first[/b] and the source nearest 
 [*][b]Max trades per trip[/b] - Total source pickups (buy legs) on one round trip.[/*]
 [*][b]Max round trips per ship[/b] - Cap how many round trips a single ship is queued.[/*]
 [*][b]Round-trip fill target[/b] - Close a trip once it reaches this % of cargo (0 = fill to capacity).[/*]
-[*][b]Minimum cargo usage per trip[/b] - Discard a trip (and stop the ship) below this % full - keeps ships from making near-empty runs. [b]Setting this too high can leave small remainders unfulfilled.[/b][/*]
+[*][b]Minimum cargo usage per trip[/b] - Discard an attempted trip below this % full - keeps ships from making near-empty runs. [b]Setting this too high can leave small remainders unfulfilled.[/b][/*]
 [*][b]Minimum per-trade fill[/b] - Reject any single buy leg smaller than this % of cargo - avoids trivial pickups. [b]Setting this too high can skip valid small trades.[/b][/*]
 [/list]
 
-[b]Restore default config[/b] / [b]Use previous config[/b] are available in the menu; "Use previous" is greyed out until a run has saved one.
+The planner window opens with the previous run config if one exists; otherwise it starts from defaults. [b]Restore default config[/b] and [b]Use previous config[/b] remain available in the menu, so you can compare or undo edits before running. "Use previous" is greyed out until a run has saved one.
 
 The [b]Select wares to fulfill[/b] button opens a sub-menu with one checkbox per needed ware, so you can drop individual wares from a run. It also has a handful of quick-select helper buttons ([i]all[/i], [i]real offers only[/i], [i]pure / intermediate / primary / supply resources only[/i]) - convenient on a wharf with a long ware list, though for most station builds the full default selection is what you want anyway. Manual testing shown that most of the time it's effectively same "select all" and "deselect all" buttons with a bit more fancy labels.
 
@@ -88,6 +94,25 @@ For your [b]own[/b] station or build storage you can choose how the delivery leg
 [/list]
 
 [b]Why a virtual offer instead of a "transfer wares" \ "exchange wares" order?[/b] The [font=Courier New]virtualmoney[/font] flag is exactly what vanilla itself uses when mining ships sell to a commander's build station, so the delivery stays an ordinary [b]Execute Trade[/b] the game already understands. The only alternative - the [i]Exchange Wares[/i] order - isn't reachable from Mission Director script and would have to be reimplemented in Lua, buying nothing but a lot of pain and re-testing. So the original mod stays exactly as it was, and this simply adds one more case it can handle: supplying a station that has no account, or only a small one.
+
+[size=3][b]Pre-existing cargo and orders[/b][/size]
+
+Selected ships are not always empty. Existing cargo reduces usable free space, which can make a ship fail the [b]Minimum cargo usage[/b] gate and receive no planner orders. The planner offers three cargo modes:
+
+[list]
+[*][b]Keep (plan around it)[/b] - Default. Existing cargo stays aboard and only free cargo space is used for planning.[/*]
+[*][b]Sell to closest buyer first[/b] - Before the ship's first planner trip, sell existing cargo. Matching cargo is offered to the planner target first, then any remainder goes to the closest reachable buyer. Cargo with no buyer stays aboard.[/*]
+[*][b]Drop cargo (jettison)[/b] - Before the ship's first planner trip, drop existing cargo as lootable crates. This is destructive, so it is never the default.[/*]
+[/list]
+
+The separate [b]Pre-existing ship orders[/b] setting controls the selected ships' current order queues:
+
+[list]
+[*][b]Keep[/b] - Default. Planner orders are appended after whatever the ship already had queued.[/*]
+[*][b]Flush[/b] - Cancel the ship's existing AI orders before adding planner orders. This is only done for ships that actually receive planner orders.[/*]
+[/list]
+
+If ships are skipped while cargo mode is [b]Keep[/b], the planner may show a hint that existing cargo left too little free space. If ships hit [b]Max trades per trip[/b] before filling up, another hint shows how many ships hit that limit.
 
 [size=3][b]Tuning note: priority, sources and the cargo floor[/b][/size]
 

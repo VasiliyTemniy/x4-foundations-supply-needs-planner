@@ -2,9 +2,9 @@
 <mdscript name="VAS_SupplyNeedsPlanner"
   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="md.xsd">
   <cues>
-    <!-- Pure planner engine. Config state, the Extension Options entry, the
-         interact-menu hooks and the whole planner / ware-select UI live in
-         supply_needs_planner_config_menu.xml (mdscript VAS_SupplyNeedsPlanner_Config),
+    <!-- Pure planner engine. Persistent config state and the Extension Options
+         entry live in supply_needs_planner_config_menu.xml; interact-menu hooks,
+         run config and ware-select UI live in supply_needs_planner_interact_menu.xml,
          which signals RunPlanner here when the player confirms a run. -->
     <cue name="Root">
       <cues>
@@ -13,17 +13,15 @@
 
              Reuses the vas_station_trader_multiorder routine's approach
              heavily: per-trip leg lists, find_buy_offer / find_sell_offer,
-             cargo budgeting, a round-trip fill target, a per-leg floor, a
-             min-cargo gate, and "immediate" LIFO trade-order emission
-             (all sells then all buys -> after the LIFO reversal all buys
-             execute first, then all sells = buy from sources, deliver once).
+             cargo budgeting, a round-trip fill target, a per-leg floor, and
+             natural trade-order emission: optional pre-sell, then buys from
+             sources, then sells to the target.
 
              Difference from the routine: a selected ship can make SEVERAL
              round trips. We plan and emit one trip, which reserves its
              offers, then plan the next against the now-reduced availability.
-             Trips execute in reverse planning order (each new "immediate"
-             trip jumps ahead of the previous one); harmless, since every
-             trip is a self-contained buy-then-deliver cycle to one target.
+             Each planned trip is emitted as a self-contained buy-then-deliver
+             cycle to one target.
 
              The orders are bound Execute Trade (TradePerform) deals via
              create_trade_order on existing buy/sell offers — never SingleBuy/
@@ -67,19 +65,20 @@
             <set_value name="$maxSourceJumps" exact="if (@$cfg.$maxSourceJumps + '') == 'null' then 7 else $cfg.$maxSourceJumps"/>
             <set_value name="$maxPriceAbovePct" exact="if (@$cfg.$maxPriceAbovePct + '') == 'null' then 500 else $cfg.$maxPriceAbovePct"/>
             <set_value name="$maxTripsPerShip" exact="if @$cfg.$maxTripsPerShip then $cfg.$maxTripsPerShip else 10"/>
+            <set_value name="$flushExistingOrders" exact="@$cfg.$preexistingOrders == 'flush'"/>
 
             <set_value name="$ordercount" exact="0"/>
             <set_value name="$shipcount" exact="0"/>
 
             <set_value name="$debugname" exact="'snp_' + (if @$target then $target.idcode else 'run')"/>
-            <debug_to_file chance="@player.entity.$vas_snp_debug_chance" name="$debugname" directory="'VAS_SupplyNeedsPlanner'" text="'Run for %s. restriction=%s, priority=%s, maxjumps %s, maxprice +%s%%, fulfill %s%%, maxwares %s, maxtrades %s, maxtrips %s, filltgt %s%%, mincargo %s%%, minleg %s%%.'.[(if @$target then $target.knownname else 'null'), $sourceRestriction, $sourcePriority, $maxSourceJumps, $maxPriceAbovePct, $fulfillPercent, $maxWares, $maxTrades, $maxTripsPerShip, $fillTargetPct, $minCargoPct, $minLegPct]" append="false"/>
+            <debug_to_file chance="@player.entity.$vas_snp_debug_chance" name="$debugname" directory="'VAS_SupplyNeedsPlanner'" text="'Run for %s. restriction=%s, priority=%s, maxjumps %s, maxprice +%s%%, fulfill %s%%, maxwares %s, maxtrades %s, maxtrips %s, filltgt %s%%, mincargo %s%%, minleg %s%%, flushorders %s.'.[(if @$target then $target.knownname else 'null'), $sourceRestriction, $sourcePriority, $maxSourceJumps, $maxPriceAbovePct, $fulfillPercent, $maxWares, $maxTrades, $maxTripsPerShip, $fillTargetPct, $minCargoPct, $minLegPct, $flushExistingOrders]" append="false"/>
 
             <do_if value="not @$target">
               <show_notification text="{2026060601,74}" timeout="5s"/>
               <return/>
             </do_if>
 
-            <!-- ── 1. Usable ships: player container haulers with free space. ── -->
+            <!-- ── 1. Usable ships: selected player ships with container storage. ── -->
             <set_value name="$usableships" exact="[]"/>
             <do_for_each name="$ship" in="$data.$ships">
               <do_if value="@$ship and $ship.isclass.ship and $ship.owner == faction.player and $ship.cargo.capacity.container gt 0">
@@ -93,6 +92,8 @@
               <return/>
             </do_if>
 
+            <set_value name="$cargoMode" exact="if @$cfg.$preexistingCargo then $cfg.$preexistingCargo else 'donothing'"/>
+
             <!-- ── 1b. Transaction mode. ──
                  'virtual' settles the delivery leg as a normal TradePerform /
                  "Execute Trade", but against a synthesized zero-price, virtual-money
@@ -103,7 +104,7 @@
                  real stations (never build storages, never foreign stations), which
                  the menu enforces by showing the choice only there; allied targets
                  are always forced to real trade here regardless of the stored value. -->
-            <!-- Modes: trade = real offers; virtual = virtual-money offers based on
+            <!-- Modes: real = real offers; virtual = virtual-money offers based on
                  buy-offer desiredamount; virtualfullcapacity = virtual-money offers based
                  on cargo target minus current cargo. -->
             <set_value name="$txMethod" exact="if @$cfg.$transactionMethod then $cfg.$transactionMethod else 'real'"/>
@@ -199,6 +200,81 @@
               <debug_to_file chance="@player.entity.$vas_snp_debug_chance" name="$debugname" directory="'VAS_SupplyNeedsPlanner'" text="'Target has no fulfillable needs (mode=%s).'.[$mode]" append="true"/>
               <return/>
             </do_if>
+
+            <!-- ── 2b. Pre-existing ship cargo. ──
+                 Cargo already aboard a selected ship eats into the free space a new
+                 trip can use, which can push the ship below the min-cargo gate so it
+                 gets no orders at all. The mode decides what to do with it:
+                   donothing - plan against the ship's actual free space (default).
+                   drop      - jettison the cargo so the whole hold is free; done the
+                               first time a ship commits a trip (below), so ships that
+                               end up unused keep their cargo. Destructive.
+                   sellfirst - first try to sell matching cargo to this planner target,
+                               then sell any remainder to the closest reachable buyer.
+                               Wares with no buyer stay aboard and still count against
+                               free space.
+                 The actual order flush and drop/sell orders are emitted inside the
+                 commit loop, not here, so ships that fail to get a real planner trip
+                 keep their orders and cargo.
+                 $shipFree.{ship} is the per-ship free volume the planner budgets a trip
+                 against (replaces the raw cargo.free.container read in the trip loop). -->
+            <set_value name="$shipFree" exact="table[]"/>
+            <set_value name="$preSellLegs" exact="table[]"/>
+            <set_value name="$preSellTaken" exact="table[]"/>
+            <do_for_each name="$ship" in="$usableships">
+              <set_value name="$cap" exact="$ship.cargo.capacity.container"/>
+              <do_if value="$cargoMode == 'drop'">
+                <set_value name="$shipFree.{$ship}" exact="$cap"/>
+              </do_if>
+              <do_elseif value="$cargoMode == 'sellfirst'">
+                <set_value name="$freed" exact="0"/>
+                <set_value name="$legs" exact="[]"/>
+                <do_for_each name="$cw" in="$ship.cargo.list">
+                  <do_if value="@$cw and $cw.waretransport == waretransport.container and $ship.cargo.{$cw}.count gt 0">
+                    <set_value name="$remaining" exact="$ship.cargo.{$cw}.count"/>
+
+                    <!-- Prefer delivering pre-existing cargo directly to this planner
+                         target when it currently has a matching buy offer. -->
+                    <remove_value name="$targetbo"/>
+                    <find_buy_offer result="$targetbo" buyer="$target" wares="$cw" tradepartner="$ship"/>
+                    <do_if value="@$targetbo and $targetbo.available and $targetbo.amount gt 0">
+                      <set_value name="$taken" exact="if @$preSellTaken.{$targetbo} then $preSellTaken.{$targetbo} else 0"/>
+                      <set_value name="$sellamt" exact="[$remaining, $targetbo.amount - $taken].min"/>
+                      <do_if value="$sellamt gt 0">
+                        <append_to_list name="$legs" exact="table[$offer = $targetbo, $amount = $sellamt]"/>
+                        <set_value name="$preSellTaken.{$targetbo}" exact="$taken + $sellamt"/>
+                        <set_value name="$freed" exact="$freed + $sellamt * $cw.volume"/>
+                        <set_value name="$remaining" exact="$remaining - $sellamt"/>
+                      </do_if>
+                    </do_if>
+
+                    <do_if value="$remaining gt 0">
+                      <run_actions ref="ClosestSellOffer" result="$bo">
+                        <param name="Ship" value="$ship"/>
+                        <param name="Ware" value="$cw"/>
+                        <param name="MaxJumps" value="$maxSourceJumps"/>
+                        <param name="Taken" value="$preSellTaken"/>
+                      </run_actions>
+                      <do_if value="@$bo">
+                        <set_value name="$taken" exact="if @$preSellTaken.{$bo} then $preSellTaken.{$bo} else 0"/>
+                        <set_value name="$sellamt" exact="[$remaining, $bo.amount - $taken].min"/>
+                        <do_if value="$sellamt gt 0">
+                          <append_to_list name="$legs" exact="table[$offer = $bo, $amount = $sellamt]"/>
+                          <set_value name="$preSellTaken.{$bo}" exact="$taken + $sellamt"/>
+                          <set_value name="$freed" exact="$freed + $sellamt * $cw.volume"/>
+                        </do_if>
+                      </do_if>
+                    </do_if>
+                  </do_if>
+                </do_for_each>
+                <set_value name="$shipFree.{$ship}" exact="[$ship.cargo.free.container + $freed, $cap].min"/>
+                <set_value name="$preSellLegs.{$ship}" exact="$legs"/>
+              </do_elseif>
+              <do_else>
+                <set_value name="$shipFree.{$ship}" exact="$ship.cargo.free.container"/>
+              </do_else>
+            </do_for_each>
+            <debug_to_file chance="@player.entity.$vas_snp_debug_chance" name="$debugname" directory="'VAS_SupplyNeedsPlanner'" text="'Pre-existing cargo mode: %s.'.[$cargoMode]" append="true"/>
 
             <!-- ── 3. Source stations, once, by restriction. ──
                        own: player-owned stations.
@@ -307,12 +383,13 @@
                Execute Trade orders — those orders do all the reservation
                work, so trade.amount (reservation-excluded) read on the
                next ship / next round is already correct: no manual tally.
-               A ship whose best trip is below the min-cargo floor is
-               retired (a later round could only do the same or less).
+              A ship whose attempted trip is below the min-cargo floor is
+              not committed; if it found possible legs, the next round starts
+              on a different ware offset before the no-progress guard ends it.
                The round loop is hard-bounded AND stops the moment a whole
                round commits nothing (anti-endless-loop guard). -->
             <set_value name="$doneships" exact="[]"/>
-            <set_value name="$committedships" exact="[]"/>
+            <set_value name="$committed_at_least_once_ships_set" exact="table[]"/>
             <set_value name="$shiptrips" exact="table[]"/>
             <!-- Run-level scan offset: advances by each committed trip's
                ware count so consecutive trips — across ships within a
@@ -324,10 +401,10 @@
             <set_value name="$leadoffset" exact="0"/>
             <set_value name="$maxRounds" exact="200"/>
             <set_value name="$stop" exact="false"/>
-            <!-- Set if any trip ran out of trade slots while it still had cargo
-               room and demand left — i.e. raising Max trades would fill more.
+            <!-- Ships that ran out of trade slots while they still had cargo room
+               and demand left — i.e. raising Max trades would fill more.
                Surfaced as a config hint in the closing notification. -->
-            <set_value name="$tradeCapWarn" exact="false"/>
+            <set_value name="$tradeCapWarnShips" exact="table[]"/>
 
             <do_all exact="$maxRounds" counter="$round">
               <do_if value="not $stop">
@@ -361,7 +438,8 @@
                         <set_value name="$selllegs" exact="[]"/>
                         <set_value name="$buylegs" exact="[]"/>
                         <set_value name="$tripvol" exact="0"/>
-                        <set_value name="$tripfree" exact="[$ship.cargo.free.container, $capacity].min"/>
+                        <!-- $shipFree honours the pre-existing-cargo mode (section 2b). -->
+                        <set_value name="$tripfree" exact="[$shipFree.{$ship}, $capacity].min"/>
                         <set_value name="$tripwares" exact="[]"/>
                         <set_value name="$triptrades" exact="0"/>
 
@@ -502,7 +580,7 @@
                          cargo room and still short of the fill target => more trades would
                          help. (Reads the last attempt's state, which persists post-loop.) -->
                     <do_if value="$triptrades ge $maxTrades and $tripvol lt $fillTargetVol and $tripfree gt $minLegVol">
-                      <set_value name="$tradeCapWarn" exact="true"/>
+                      <set_value name="$tradeCapWarnShips.{$ship}" exact="true"/>
                     </do_if>
 
                     <!-- Commit the surviving trip (a strategy cleared the floor). -->
@@ -516,21 +594,39 @@
                       <run_actions ref="MergeLegsBySite" result="$selllegs">
                         <param name="Legs" value="$selllegs"/>
                       </run_actions>
-                      <!-- Order the pickups into the farthest-from-target-first route.
-                           Emitted below under LIFO "immediate" orders, which invert the
-                           returned nearest-first chain into farthest-first execution, so
-                           the source nearest the target is the last pickup and the loaded
-                           final hop is the shortest. See RouteLegsFarthestFirst. -->
+                      <!-- RouteLegsFarthestFirst returns nearest-target-first; buys are
+                           emitted in reverse so execution is farthest-target-first and
+                           the loaded final hop is shortest. -->
                       <run_actions ref="RouteLegsFarthestFirst" result="$buylegs">
                         <param name="Legs" value="$buylegs"/>
                         <param name="Anchor" value="$target"/>
                       </run_actions>
-                      <!-- Sells first; LIFO makes all buys execute before all sells. -->
-                      <do_all exact="$selllegs.count" counter="$li">
-                        <create_trade_order object="$ship" tradeoffer="$selllegs.{$li}.$offer" amount="$selllegs.{$li}.$amount" immediate="true"/>
-                      </do_all>
+
+                      <!-- HANDLING THE PREEXISTING CARGO (ONCE) START -->
+                      <!-- Moving this outside of this do while loop would make us try
+                           to flush ships that could get no real round trips, which
+                           could be worse than having just some tidy code. Consider
+                           moving this above the do while loop if problems occur -->
+                      <!-- This makes pre-existing ship setup execute once per ship
+                           for the whole planner run, before its first committed trip. -->
+                      <do_if value="not @$committed_at_least_once_ships_set.{$ship}">
+                        <run_actions ref="EmitPreExistingShipSetup" result="$preorders">
+                          <param name="Ship" value="$ship"/>
+                          <param name="CargoMode" value="$cargoMode"/>
+                          <param name="PreSellLegs" value="$preSellLegs"/>
+                          <param name="FlushExistingOrders" value="$flushExistingOrders"/>
+                          <param name="DebugName" value="$debugname"/>
+                        </run_actions>
+                        <set_value name="$ordercount" exact="$ordercount + $preorders"/>
+                      </do_if>
+                      <!-- HANDLING THE PREEXISTING CARGO (ONCE) END -->
+
                       <do_all exact="$buylegs.count" counter="$li">
-                        <create_trade_order object="$ship" tradeoffer="$buylegs.{$li}.$offer" amount="$buylegs.{$li}.$amount" immediate="true"/>
+                        <set_value name="$rli" exact="$buylegs.count + 1 - $li"/>
+                        <create_trade_order object="$ship" tradeoffer="$buylegs.{$rli}.$offer" amount="$buylegs.{$rli}.$amount"/>
+                      </do_all>
+                      <do_all exact="$selllegs.count" counter="$li">
+                        <create_trade_order object="$ship" tradeoffer="$selllegs.{$li}.$offer" amount="$selllegs.{$li}.$amount"/>
                       </do_all>
                       <set_value name="$ordercount" exact="$ordercount + $selllegs.count + $buylegs.count"/>
                       <set_value name="$progress" exact="true"/>
@@ -541,8 +637,8 @@
                       <do_while value="$needs.count gt 0 and $leadoffset ge $needs.count">
                         <set_value name="$leadoffset" exact="$leadoffset - $needs.count"/>
                       </do_while>
-                      <do_if value="not $committedships.indexof.{$ship}">
-                        <append_to_list name="$committedships" exact="$ship"/>
+                      <do_if value="not @$committed_at_least_once_ships_set.{$ship}">
+                        <set_value name="$committed_at_least_once_ships_set.{$ship}" exact="true"/>
                       </do_if>
                       <debug_to_file chance="@player.entity.$vas_snp_debug_chance" name="$debugname" directory="'VAS_SupplyNeedsPlanner'" text="'  %s round %s committed: %s wares, %s m3 (%s%% of %s).'.[$ship.idcode, $round, $tripwares.count, $tripvol, (if $capacity gt 0 then ($tripvol * 100) / $capacity else 0), $capacity]" append="true"/>
                     </do_if>
@@ -582,7 +678,19 @@
               </do_for_each>
             </do_if>
 
-            <set_value name="$shipcount" exact="$committedships.count"/>
+            <set_value name="$shipcount" exact="$committed_at_least_once_ships_set.keys.count"/>
+
+            <set_value name="$cargoBlockedCount" exact="0"/>
+            <do_if value="$cargoMode == 'donothing'">
+              <do_for_each name="$ship" in="$usableships">
+                <do_if value="not @$committed_at_least_once_ships_set.{$ship}
+                              and $ship.cargo.free.container lt $ship.cargo.capacity.container
+                              and ($ship.cargo.free.container le 0
+                                   or $ship.cargo.free.container lt ($ship.cargo.capacity.container * $minCargoPct) / 100)">
+                  <set_value name="$cargoBlockedCount" exact="$cargoBlockedCount + 1"/>
+                </do_if>
+              </do_for_each>
+            </do_if>
 
             <!-- ── 5. Summary ── -->
             <do_if value="$ordercount gt 0">
@@ -592,28 +700,22 @@
             <do_else>
               <show_notification text="{2026060601,72}" timeout="5s"/>
             </do_else>
-            <do_if value="$tradeCapWarn">
-              <show_notification text="{2026060601,76}" timeout="8s"/>
+            <do_if value="$tradeCapWarnShips.keys.count gt 0">
+              <show_notification text="{2026060601,76}.[$tradeCapWarnShips.keys.count]" timeout="8s"/>
+            </do_if>
+            <do_if value="$cargoBlockedCount gt 0">
+              <show_notification text="{2026060601,77}.[$cargoBlockedCount]" timeout="8s"/>
             </do_if>
             <debug_to_file chance="@player.entity.$vas_snp_debug_chance" name="$debugname" directory="'VAS_SupplyNeedsPlanner'" text="'Done: %s orders across %s ship(s).'.[$ordercount, $shipcount]" append="true"/>
           </actions>
         </library>
 
         <!--@doc
-            Order a list of trade legs into a farthest-from-anchor-first visit route.
-            A greedy nearest-neighbour chain anchored at $Anchor (the delivery target):
-            repeatedly take the nearest unrouted SECTOR by gate distance, then the nearest
-            STATION within it by physical distance, stepping the route point onward. The
-            chain comes out nearest-anchor-FIRST and is returned as-is (NOT reversed):
-            callers emit it under LIFO "immediate" trade orders, which invert it into
-            farthest-first execution — so the source nearest the target is the LAST pickup
-            and the loaded final hop is the shortest possible.
-            Distances are always read with a leg's station as the object
-            (station.gatedistance.{$Anchor}), never as a method ON $Anchor, so $Anchor may
-            be a build storage (valid as a distance target, but not as a distance source).
-            Params:
-              Legs   - list of legs; each must hold $station (the stop). Other fields kept.
-              Anchor - the delivery target the route is anchored at.
+            Order trade legs into a nearest-anchor-first route. Callers that want the
+            shortest loaded final hop emit the returned list in reverse, making the
+            source nearest the target the last pickup. Distances are read with a leg's
+            station as the object, so $Anchor may be a build storage.
+            Params: Legs - list of legs with $station; Anchor - delivery target.
             Returns: a list with the same leg tables, in route order. -->
         <library name="RouteLegsFarthestFirst" purpose="run_actions">
           <params>
@@ -699,6 +801,84 @@
               </do_else>
             </do_for_each>
             <return value="$merged"/>
+          </actions>
+        </library>
+
+        <!--@doc
+            Emit the one-time setup orders/actions for a ship's first committed planner
+            trip. This intentionally runs from the commit block, so unused ships keep
+            their old orders and cargo.
+            Params: Ship; CargoMode; PreSellLegs; FlushExistingOrders; DebugName.
+            Returns: number of pre-sell trade orders created. -->
+        <library name="EmitPreExistingShipSetup" purpose="run_actions">
+          <params>
+            <param name="Ship" comment="Ship receiving its first committed planner trip"/>
+            <param name="CargoMode" comment="Pre-existing cargo handling mode"/>
+            <param name="PreSellLegs" comment="Table of pre-sell legs by ship"/>
+            <param name="FlushExistingOrders" comment="Cancel existing queued orders before adding planner orders"/>
+            <param name="DebugName" comment="Debug log file name"/>
+          </params>
+          <actions>
+            <set_value name="$preorders" exact="0"/>
+            <do_if value="$FlushExistingOrders">
+              <cancel_all_orders object="$Ship"/>
+              <debug_to_file chance="@player.entity.$vas_snp_debug_chance" name="$DebugName" directory="'VAS_SupplyNeedsPlanner'" text="'  %s existing orders flushed.'.[$Ship.idcode]" append="true"/>
+            </do_if>
+            <do_if value="$CargoMode == 'drop'">
+              <drop_cargo object="$Ship" ware="$Ship.cargo.table"/>
+            </do_if>
+            <do_elseif value="$CargoMode == 'sellfirst' and @$PreSellLegs.{$Ship}">
+              <do_for_each name="$leg" in="$PreSellLegs.{$Ship}">
+                <do_if value="@$leg.$offer and $leg.$offer.available and $leg.$amount gt 0">
+                  <create_trade_order object="$Ship" tradeoffer="$leg.$offer" amount="$leg.$amount"/>
+                  <set_value name="$preorders" exact="$preorders + 1"/>
+                  <debug_to_file chance="@player.entity.$vas_snp_debug_chance" name="$DebugName" directory="'VAS_SupplyNeedsPlanner'" text="'  %s pre-sell: %s x%s to %s.'.[$Ship.idcode, $leg.$offer.ware, $leg.$amount, $leg.$offer.buyer.knownname]" append="true"/>
+                </do_if>
+              </do_for_each>
+            </do_elseif>
+            <return value="$preorders"/>
+          </actions>
+        </library>
+
+        <!--@doc
+            Closest buy offer to dump a ware into, for the 'sell first' pre-existing-cargo
+            mode. Searches every known buyer visible to the ship galaxy-wide, keeps only
+            non-hostile buyers within MaxJumps gate jumps that currently want some, and
+            returns the closest one to the ship. Returns null when no
+            valid buyer exists — the caller then leaves that ware aboard.
+            Params: Ship - the seller; Ware - ware to offload; MaxJumps - max gate jumps; Taken - amounts already planned by offer.
+            Returns: a buy offer, or null. -->
+        <library name="ClosestSellOffer" purpose="run_actions">
+          <params>
+            <param name="Ship" comment="Ship holding the cargo to sell"/>
+            <param name="Ware" comment="Ware to sell"/>
+            <param name="MaxJumps" comment="Max gate jumps from the ship to a buyer"/>
+            <param name="Taken" comment="Table of amounts already planned per offer"/>
+          </params>
+          <actions>
+            <find_buy_offer multiple="true" wares="$Ware" tradepartner="$Ship" space="player.galaxy" result="$buyers"/>
+            <set_value name="$best" exact="null"/>
+            <set_value name="$bestdist" exact="0"/>
+            <set_value name="$bestphys" exact="0"/>
+            <do_for_each name="$o" in="$buyers">
+              <do_if value="@$o and @$o.buyer and $o.available and $o.amount gt 0 and not $o.buyer.ishostileto.{faction.player}">
+                <set_value name="$taken" exact="if @$Taken.{$o} then $Taken.{$o} else 0"/>
+                <set_value name="$dist" exact="$Ship.gatedistance.{$o.buyer}"/>
+                <set_value name="$phys" exact="$o.buyer.distanceto.{$Ship}"/>
+                <do_if value="($o.amount - $taken) gt 0
+                              and $dist ge 0
+                              and $dist le $MaxJumps
+                              and not @$o.buyer.sector.isblacklisted.{blacklisttype.sectoractivity}.{blacklistgroup.civilian}.{$Ship}
+                              and not @$o.buyer.sector.isblacklisted.{blacklisttype.sectortravel}.{blacklistgroup.civilian}.{$Ship}
+                              and not $o.buyer.isblacklisted.{blacklisttype.objectactivity}.{blacklistgroup.civilian}.{$Ship}
+                              and (not @$best or $dist lt $bestdist or ($dist == $bestdist and $phys lt $bestphys))">
+                  <set_value name="$best" exact="$o"/>
+                  <set_value name="$bestdist" exact="$dist"/>
+                  <set_value name="$bestphys" exact="$phys"/>
+                </do_if>
+              </do_if>
+            </do_for_each>
+            <return value="$best"/>
           </actions>
         </library>
       </cues>

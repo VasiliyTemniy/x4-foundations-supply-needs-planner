@@ -33,6 +33,13 @@
     <t id="39">Real offers</t>
     <t id="40">Virtual offers with overrides check</t>
     <t id="41">Virtual offers based on ware capacity</t>
+    <t id="42">Pre-existing ship cargo</t>
+    <t id="43">Keep (plan around it)</t>
+    <t id="44">Sell to closest buyer first</t>
+    <t id="45">Drop cargo (jettison)</t>
+    <t id="46">Pre-existing ship orders</t>
+    <t id="47">Keep</t>
+    <t id="48">Flush</t>
 
     <!-- Buttons: reserved 60-69 -->
     <t id="60">Run planner</t>
@@ -43,13 +50,13 @@
     <t id="65">Fulfill build storage needs</t>
 
     <!-- Notifications and logbook: reserved 70-99 -->
-    <t id="70">Supply planner started for %1.</t>
-    <t id="71">Supply planner queued %1 trade orders for %2 ships.</t>
-    <t id="72">Supply planner found nothing useful to queue.</t>
-    <t id="73">No usable selected trader ships were found.</t>
-    <t id="74">No build storage target was found.</t>
-    <t id="75">No previous config saved yet.</t>
-    <t id="76">Some ships hit the Max trades per round trip limit before filling up. Raising it may improve cargo fill.</t>
+    <t id="70">Supply planner: started for %1.</t>
+    <t id="71">Supply planner: queued %1 trade orders for %2 ships.</t>
+    <t id="72">Supply planner: found nothing useful to queue.</t>
+    <t id="73">Supply planner: no usable selected trader ships were found.</t>
+    <t id="74">Supply planner: no build storage target was found.</t>
+    <t id="76">Supply planner: %1 ships hit the Max trades per round trip limit before filling up. Raising it may improve cargo fill.</t>
+    <t id="77">Supply planner: %1 selected ships may have been skipped because existing cargo left too little free space.</t>
 
     <!-- Ware-select submenu (title + buttons) -->
     <t id="100">Select wares to fulfill</t>

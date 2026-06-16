@@ -4,7 +4,7 @@
   name="[VAS] Supply Needs Planner"
   description="Right-click a station or its build storage with selected trader ships to queue Execute Trade deals that fulfill its needs from your (or any non-hostile) stations."
   author="VasiliyTemniy"
-  version="110"
+  version="120"
   date="2026-06-16"
   save="0">
   <dependency id="ws_2042901274" optional="false" name="SirNukes Mod Support APIs"/>
